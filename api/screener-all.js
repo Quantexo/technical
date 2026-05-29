@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
 // ------------------------------------------------------------
-// All technical indicator functions (copy from screener.js)
+// All technical indicator functions (same as before)
 // ------------------------------------------------------------
 function SMA(values, period) {
     const result = new Array(values.length).fill(null);
@@ -124,7 +124,7 @@ function detectCrossover(fastMA, slowMA) {
 }
 
 // ------------------------------------------------------------
-// Process a single symbol (same as before)
+// Process a single symbol (unchanged)
 // ------------------------------------------------------------
 async function processSymbol(supabase, symbol, limit = 300) {
     try {
@@ -213,7 +213,7 @@ async function processSymbol(supabase, symbol, limit = 300) {
 }
 
 // ------------------------------------------------------------
-// Main handler for /api/screener/all
+// Main handler for /api/screener/all with pagination
 // ------------------------------------------------------------
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -229,7 +229,12 @@ export default async function handler(req, res) {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     try {
-        // ---------- Get ALL distinct symbols (paginated) ----------
+        // Parse pagination parameters
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20)); // max 50 per page
+        const offset = (page - 1) * limit;
+
+        // Get ALL distinct symbols (paginated fetch from Supabase)
         let allSymbols = [];
         let from = 0;
         const pageSize = 1000;
@@ -248,13 +253,16 @@ export default async function handler(req, res) {
         }
 
         const uniqueSymbols = [...new Set(allSymbols)];
-        console.log(`Found ${uniqueSymbols.length} unique symbols`);
+        const totalSymbols = uniqueSymbols.length;
+        const totalPages = Math.ceil(totalSymbols / limit);
 
-        // Optional: limit via query param ?max=10 to avoid timeout
-        const maxSymbols = parseInt(req.query.max, 10);
-        const symbolsToProcess = maxSymbols ? uniqueSymbols.slice(0, maxSymbols) : uniqueSymbols;
+        // Slice the symbols for the requested page
+        const symbolsToProcess = uniqueSymbols.slice(offset, offset + limit);
+        if (symbolsToProcess.length === 0) {
+            return res.status(404).json({ error: 'Page not found' });
+        }
 
-        // Process in batches of 3 (to be safe within 10s timeout)
+        // Process in batches of 3 (to stay within timeout)
         const batchSize = 3;
         const results = [];
         for (let i = 0; i < symbolsToProcess.length; i += batchSize) {
@@ -267,7 +275,12 @@ export default async function handler(req, res) {
         }
 
         return res.status(200).json({
-            total_symbols_requested: symbolsToProcess.length,
+            pagination: {
+                current_page: page,
+                per_page: limit,
+                total_symbols: totalSymbols,
+                total_pages: totalPages,
+            },
             results,
         });
     } catch (err) {
