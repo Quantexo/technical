@@ -95,7 +95,7 @@ export default async function handler(req, res) {
         // Fetch latest N records for the symbol (ascending date)
         const { data, error } = await supabase
             .from('prices')
-            .select('close, volume')
+            .select('close, volume, date')
             .eq('symbol', symbol.toUpperCase())
             .order('date', { ascending: true })
             .limit(limitNum);
@@ -107,6 +107,7 @@ export default async function handler(req, res) {
 
         const closes = data.map(row => parseFloat(row.close));
         const volumes = data.map(row => parseInt(row.volume, 10));
+        const latestDate = data[data.length - 1].date;
 
         // Calculate indicators
         const sma = calculateSMA(closes, periodNum);
@@ -118,6 +119,7 @@ export default async function handler(req, res) {
             symbol: symbol.toUpperCase(),
             period: periodNum,
             records_used: data.length,
+            latest_traded_date: latestDate,
             indicators: {
                 rsi: rsi !== null ? parseFloat(rsi.toFixed(2)) : null,
                 sma: sma !== null ? parseFloat(sma.toFixed(2)) : null,
