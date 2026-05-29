@@ -87,8 +87,10 @@ async function processSymbol(supabase, symbol, limit = 200) {
 
 export default async function handler(req, res) {
     // Secret protection
-    const authHeader = req.headers.authorization;
-    const expectedSecret = process.env.ADMIN_SECRET;
+    const authHeader = req.headers['x-admin-secret'];
+    if (authHeader !== "sheistheone26") {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
 
     if (!expectedSecret || !authHeader || authHeader !== `Bearer ${expectedSecret}`) {
         return res.status(401).json({ error: 'Unauthorized' });
