@@ -93,11 +93,12 @@ export default async function handler(req, res) {
 
     try {
         // Fetch latest N records for the symbol (ascending date)
+        // Fetch most recent N records (newest first)
         const { data, error } = await supabase
             .from('prices')
             .select('close, volume, date')
             .eq('symbol', symbol.toUpperCase())
-            .order('date', { ascending: true })
+            .order('date', { ascending: false })   // newest first
             .limit(limitNum);
 
         if (error) throw error;
@@ -105,9 +106,12 @@ export default async function handler(req, res) {
             return res.status(404).json({ error: `No price data found for symbol ${symbol}` });
         }
 
+        // Reverse to get chronological order (oldest → newest) for indicators
+        data.reverse();
+
         const closes = data.map(row => parseFloat(row.close));
         const volumes = data.map(row => parseInt(row.volume, 10));
-        const latestDate = data[data.length - 1].date;
+        const latestDate = data[data.length - 1].date; // now the actual newest date
 
         // Calculate indicators
         const sma = calculateSMA(closes, periodNum);
