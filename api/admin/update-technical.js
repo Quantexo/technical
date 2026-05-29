@@ -1,21 +1,133 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Copy all indicator functions from screener.js (SMA, EMA, RSI, MACD, ATR, OBV, detectCrossover)
-// ... (paste the same functions here to keep this file self-contained)
+// ------------------------------------------------------------
+// Technical indicator functions (self-contained)
+// ------------------------------------------------------------
+function SMA(values, period) {
+    const result = new Array(values.length).fill(null);
+    let sum = 0;
+    for (let i = 0; i < values.length; i++) {
+        sum += values[i];
+        if (i >= period - 1) {
+            result[i] = sum / period;
+            sum -= values[i - (period - 1)];
+        }
+    }
+    return result;
+}
 
-// For brevity, I'll assume you have them. In production, you'd import shared utils.
-// I'll include the minimal set.
+function EMA(values, period) {
+    const result = new Array(values.length).fill(null);
+    const multiplier = 2 / (period + 1);
+    let ema = values[0];
+    result[0] = ema;
+    for (let i = 1; i < values.length; i++) {
+        ema = (values[i] - ema) * multiplier + ema;
+        result[i] = ema;
+    }
+    return result;
+}
 
-function SMA(values, period) { /* same as before */ }
-function EMA(values, period) { /* same */ }
-function RSI(values, period) { /* same */ }
-function MACD(prices) { /* same */ }
-function ATR(high, low, close) { /* same */ }
-function OBV(close, volume) { /* same */ }
-function detectCrossover(fastMA, slowMA) { /* same */ }
+function RSI(values, period = 14) {
+    const result = new Array(values.length).fill(null);
+    if (values.length < period + 1) return result;
+    let gains = 0, losses = 0;
+    for (let i = 1; i <= period; i++) {
+        const diff = values[i] - values[i - 1];
+        if (diff >= 0) gains += diff;
+        else losses -= diff;
+    }
+    let avgGain = gains / period, avgLoss = losses / period;
+    let rs = avgGain / avgLoss;
+    result[period] = 100 - (100 / (1 + rs));
+    for (let i = period + 1; i < values.length; i++) {
+        const diff = values[i] - values[i - 1];
+        if (diff >= 0) {
+            avgGain = (avgGain * (period - 1) + diff) / period;
+            avgLoss = (avgLoss * (period - 1)) / period;
+        } else {
+            avgGain = (avgGain * (period - 1)) / period;
+            avgLoss = (avgLoss * (period - 1) - diff) / period;
+        }
+        rs = avgGain / avgLoss;
+        result[i] = 100 - (100 / (1 + rs));
+    }
+    return result;
+}
 
+function MACD(prices, fast = 12, slow = 26, signalPeriod = 9) {
+    const emaFast = EMA(prices, fast);
+    const emaSlow = EMA(prices, slow);
+    const macdLine = emaFast.map((v, i) => (v !== null && emaSlow[i] !== null) ? v - emaSlow[i] : null);
+    const signalLine = EMA(macdLine.filter(v => v !== null), signalPeriod);
+    const alignedSignal = new Array(prices.length).fill(null);
+    let idx = 0;
+    for (let i = 0; i < macdLine.length; i++) {
+        if (macdLine[i] !== null && idx < signalLine.length) {
+            alignedSignal[i] = signalLine[idx];
+            idx++;
+        }
+    }
+    const histogram = macdLine.map((v, i) => (v !== null && alignedSignal[i] !== null) ? v - alignedSignal[i] : null);
+    return { macd: macdLine, signal: alignedSignal, histogram };
+}
+
+function ATR(high, low, close, period = 14) {
+    const tr = new Array(high.length).fill(null);
+    if (high.length === 0) return tr;
+    tr[0] = high[0] - low[0];
+    for (let i = 1; i < high.length; i++) {
+        const hl = high[i] - low[i];
+        const hc = Math.abs(high[i] - close[i - 1]);
+        const lc = Math.abs(low[i] - close[i - 1]);
+        tr[i] = Math.max(hl, hc, lc);
+    }
+    const atr = new Array(high.length).fill(null);
+    if (high.length < period) return atr;
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += tr[i];
+    atr[period - 1] = sum / period;
+    for (let i = period; i < tr.length; i++) {
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period;
+    }
+    return atr;
+}
+
+function OBV(close, volume) {
+    const obv = new Array(close.length).fill(0);
+    if (close.length === 0) return obv;
+    obv[0] = volume[0];
+    for (let i = 1; i < close.length; i++) {
+        if (close[i] > close[i - 1]) obv[i] = obv[i - 1] + volume[i];
+        else if (close[i] < close[i - 1]) obv[i] = obv[i - 1] - volume[i];
+        else obv[i] = obv[i - 1];
+    }
+    return obv;
+}
+
+function detectCrossover(fastMA, slowMA) {
+    if (fastMA.length < 2 || slowMA.length < 2) return { status: null, signal: null, fast: null, slow: null };
+    const lastIdx = fastMA.length - 1;
+    const fastNow = fastMA[lastIdx];
+    const slowNow = slowMA[lastIdx];
+    if (fastNow === null || slowNow === null) return { status: null, signal: null, fast: fastNow, slow: slowNow };
+    const fastPrev = fastMA[lastIdx - 1];
+    const slowPrev = slowMA[lastIdx - 1];
+    let status = 'neutral';
+    if (fastNow > slowNow) status = 'bullish';
+    else if (fastNow < slowNow) status = 'bearish';
+    let signal = 'none';
+    if (fastPrev !== null && slowPrev !== null) {
+        if (fastPrev <= slowPrev && fastNow > slowNow) signal = 'golden_cross';
+        else if (fastPrev >= slowPrev && fastNow < slowNow) signal = 'death_cross';
+    }
+    return { status, signal, fast: fastNow, slow: slowNow };
+}
+
+// ------------------------------------------------------------
+// Process a single symbol
+// ------------------------------------------------------------
 async function processSymbol(supabase, symbol, limit = 200) {
-    // same as in screener-all.js but return flat object for DB
     try {
         const { data, error } = await supabase
             .from('prices')
@@ -24,7 +136,7 @@ async function processSymbol(supabase, symbol, limit = 200) {
             .order('date', { ascending: false })
             .limit(limit);
         if (error) throw error;
-        if (!data || data.length < 50) throw new Error('Insufficient data');
+        if (!data || data.length < 50) throw new Error(`Insufficient data (${data?.length || 0} rows)`);
         data.reverse();
 
         const close = data.map(d => parseFloat(d.close));
@@ -85,26 +197,34 @@ async function processSymbol(supabase, symbol, limit = 200) {
     }
 }
 
+// ------------------------------------------------------------
+// Main handler
+// ------------------------------------------------------------
 export default async function handler(req, res) {
-    // Replace the header check with:
-    const secret = req.query.secret;
-    if (secret !== "test123") {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
+    // CORS (optional)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
 
-    if (!expectedSecret || !authHeader || authHeader !== `Bearer ${expectedSecret}`) {
+    if (req.method === 'OPTIONS') return res.status(200).end();
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+    // ----- Authentication (temporary simple secret) -----
+    const secret = req.query.secret;
+    // Change this to your own secret (alphanumeric only, no special chars)
+    if (secret !== 'test123') {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // use service role for write
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Use service role key for write
     if (!supabaseUrl || !supabaseKey) {
+        console.error('Missing Supabase credentials');
         return res.status(500).json({ error: 'Supabase credentials missing' });
     }
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     try {
-        // Get all distinct symbols
+        // Get all distinct symbols (paginated)
         let allRows = [];
         let from = 0;
         const pageSize = 1000;
@@ -121,17 +241,17 @@ export default async function handler(req, res) {
             from += pageSize;
         }
         const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))];
-        const results = [];
+        console.log(`Found ${uniqueSymbols.length} symbols`);
 
-        // Process with concurrency 5 to avoid rate limits
-        const concurrency = 5;
+        // Process with concurrency 3 to avoid timeout / rate limits
+        const results = [];
+        const concurrency = 3;
         const queue = [...uniqueSymbols];
         async function worker() {
             while (queue.length) {
                 const sym = queue.shift();
                 try {
                     const indicators = await processSymbol(supabase, sym);
-                    // Upsert into technical_indicators
                     const { error: upsertError } = await supabase
                         .from('technical_indicators')
                         .upsert(indicators, { onConflict: 'symbol' });
@@ -152,6 +272,6 @@ export default async function handler(req, res) {
         });
     } catch (err) {
         console.error('Update error:', err);
-        return res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error', details: err.message });
     }
 }
