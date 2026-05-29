@@ -1,8 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
-// ----------------------------------------------
-// Technical Indicator Functions
-// ----------------------------------------------
+// ------------------------------------------------------------
+// All technical indicator functions (copy from screener.js)
+// ------------------------------------------------------------
 function SMA(values, period) {
     const result = new Array(values.length).fill(null);
     let sum = 0;
@@ -123,39 +123,20 @@ function detectCrossover(fastMA, slowMA) {
     return { status, signal, fast: fastNow, slow: slowNow };
 }
 
-// ----------------------------------------------
-// Main Handler (single symbol only)
-// ----------------------------------------------
-export default async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
-    if (req.method === 'OPTIONS') return res.status(200).end();
-    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
-    const { symbol, limit = 300 } = req.query;
-    if (!symbol) return res.status(400).json({ error: 'Missing symbol parameter' });
-
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_ANON_KEY;
-    if (!supabaseUrl || !supabaseKey) {
-        return res.status(500).json({ error: 'Supabase credentials missing' });
-    }
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
+// ------------------------------------------------------------
+// Process a single symbol (same as before)
+// ------------------------------------------------------------
+async function processSymbol(supabase, symbol, limit = 300) {
     try {
         const { data, error } = await supabase
             .from('prices')
             .select('date, open, high, low, close, volume')
-            .eq('symbol', symbol.toUpperCase())
+            .eq('symbol', symbol)
             .order('date', { ascending: false })
-            .limit(parseInt(limit, 10));
-
+            .limit(limit);
         if (error) throw error;
-        if (!data || data.length === 0) {
-            return res.status(404).json({ error: `No data for symbol ${symbol}` });
-        }
-
-        data.reverse(); // chronological order
+        if (!data || data.length < 50) throw new Error(`Insufficient data (${data?.length || 0} rows)`);
+        data.reverse();
 
         const closePrices = data.map(d => parseFloat(d.close));
         const highPrices = data.map(d => parseFloat(d.high));
@@ -185,10 +166,9 @@ export default async function handler(req, res) {
         const latestDate = dates[lastIdx];
         const latestClose = closePrices[lastIdx];
 
-        return res.status(200).json({
-            symbol: symbol.toUpperCase(),
+        return {
+            symbol,
             latest_traded_date: latestDate,
-            records_used: data.length,
             indicators: {
                 rsi_14: rsi14[lastIdx] !== null ? parseFloat(rsi14[lastIdx].toFixed(2)) : null,
                 macd: {
@@ -201,36 +181,24 @@ export default async function handler(req, res) {
                 latest_close: parseFloat(latestClose.toFixed(2)),
                 moving_average_crossovers: {
                     golden_cross_death_cross: {
-                        name: "Golden Cross / Death Cross",
-                        fast_ma: "SMA 50",
-                        slow_ma: "SMA 200",
                         fast_value: golden.fast !== null ? parseFloat(golden.fast.toFixed(2)) : null,
                         slow_value: golden.slow !== null ? parseFloat(golden.slow.toFixed(2)) : null,
                         status: golden.status,
                         signal: golden.signal,
                     },
                     short_term_cross: {
-                        name: "Short-term Cross",
-                        fast_ma: "EMA 9",
-                        slow_ma: "EMA 21",
                         fast_value: short.fast !== null ? parseFloat(short.fast.toFixed(2)) : null,
                         slow_value: short.slow !== null ? parseFloat(short.slow.toFixed(2)) : null,
                         status: short.status,
                         signal: short.signal,
                     },
                     swing_trading_cross: {
-                        name: "Swing Trading Cross",
-                        fast_ma: "EMA 20",
-                        slow_ma: "EMA 50",
                         fast_value: swing.fast !== null ? parseFloat(swing.fast.toFixed(2)) : null,
                         slow_value: swing.slow !== null ? parseFloat(swing.slow.toFixed(2)) : null,
                         status: swing.status,
                         signal: swing.signal,
                     },
                     medium_term_cross: {
-                        name: "Medium-term Cross",
-                        fast_ma: "EMA 50",
-                        slow_ma: "EMA 100",
                         fast_value: medium.fast !== null ? parseFloat(medium.fast.toFixed(2)) : null,
                         slow_value: medium.slow !== null ? parseFloat(medium.slow.toFixed(2)) : null,
                         status: medium.status,
@@ -238,9 +206,72 @@ export default async function handler(req, res) {
                     },
                 },
             },
+        };
+    } catch (err) {
+        return { symbol, error: err.message };
+    }
+}
+
+// ------------------------------------------------------------
+// Main handler for /api/screener/all
+// ------------------------------------------------------------
+export default async function handler(req, res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
+    if (req.method === 'OPTIONS') return res.status(200).end();
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_ANON_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+        return res.status(500).json({ error: 'Supabase credentials missing' });
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        // ---------- Get ALL distinct symbols (paginated) ----------
+        let allSymbols = [];
+        let from = 0;
+        const pageSize = 1000;
+        let hasMore = true;
+
+        while (hasMore) {
+            const { data, error } = await supabase
+                .from('prices')
+                .select('symbol')
+                .range(from, from + pageSize - 1);
+            if (error) throw error;
+            if (!data || data.length === 0) break;
+            allSymbols.push(...data.map(row => row.symbol));
+            if (data.length < pageSize) hasMore = false;
+            from += pageSize;
+        }
+
+        const uniqueSymbols = [...new Set(allSymbols)];
+        console.log(`Found ${uniqueSymbols.length} unique symbols`);
+
+        // Optional: limit via query param ?max=10 to avoid timeout
+        const maxSymbols = parseInt(req.query.max, 10);
+        const symbolsToProcess = maxSymbols ? uniqueSymbols.slice(0, maxSymbols) : uniqueSymbols;
+
+        // Process in batches of 3 (to be safe within 10s timeout)
+        const batchSize = 3;
+        const results = [];
+        for (let i = 0; i < symbolsToProcess.length; i += batchSize) {
+            const batch = symbolsToProcess.slice(i, i + batchSize);
+            const batchResults = await Promise.allSettled(batch.map(sym => processSymbol(supabase, sym)));
+            for (const r of batchResults) {
+                if (r.status === 'fulfilled') results.push(r.value);
+                else results.push({ symbol: 'unknown', error: r.reason?.message || 'Failed' });
+            }
+        }
+
+        return res.status(200).json({
+            total_symbols_requested: symbolsToProcess.length,
+            results,
         });
     } catch (err) {
-        console.error('Screener error:', err);
+        console.error('Screener-all error:', err);
         return res.status(500).json({ error: 'Internal server error' });
     }
 }
