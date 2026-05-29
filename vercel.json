@@ -7,6 +7,7 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" },
     { "source": "/api/volume/all", "destination": "/api/volume" },
-    { "source": "/api/volume", "destination": "/api/volume" }
+    { "source": "/api/volume", "destination": "/api/volume" },
+    { "source": "/api/screener/all", "destination": "/api/screener-all" }
   ]
 }
