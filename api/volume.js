@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 
+// Helper: get average volume for a given symbol over last N days
 async function getAverageVolume(supabase, symbol, days) {
     const { data, error } = await supabase
         .from('prices')
@@ -20,40 +21,35 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-    // Check environment variables first
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_ANON_KEY;
     if (!supabaseUrl || !supabaseKey) {
-        console.error('Missing SUPABASE_URL or SUPABASE_ANON_KEY');
-        return res.status(500).json({ error: 'Server misconfigured: missing Supabase credentials' });
+        return res.status(500).json({ error: 'Supabase credentials missing' });
     }
-
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    try {
-        // Parse URL manually (Vercel provides req.url)
-        const url = new URL(req.url, `http://${req.headers.host}`);
-        const pathname = url.pathname;
+    // Parse the full request URL to detect /all endpoint
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const pathname = url.pathname;
 
-        // Case: /api/volume/all
-        if (pathname.endsWith('/all')) {
-            // Get all unique symbols (using a more efficient query)
-            const { data: symbolsData, error: symbolsError } = await supabase
+    // CASE: /api/volume/all (rewritten from /api/volume/all to /api/volume)
+    if (pathname.endsWith('/all')) {
+        try {
+            // Get all distinct symbols – fetch many rows and deduplicate
+            const { data: allRows, error: fetchError } = await supabase
                 .from('prices')
                 .select('symbol')
-                .order('symbol')
-                .limit(500); // increase if needed
+                .limit(10000); // high enough to cover all symbols
+            if (fetchError) throw fetchError;
 
-            if (symbolsError) throw symbolsError;
-            const uniqueSymbols = [...new Set(symbolsData.map(row => row.symbol))];
-
+            const uniqueSymbols = [...new Set(allRows.map(row => row.symbol))];
             const results = [];
+
             for (const sym of uniqueSymbols) {
                 try {
                     const avgVol = await getAverageVolume(supabase, sym, 20);
                     results.push({ symbol: sym, average_volume_20d: avgVol });
                 } catch (err) {
-                    console.error(`Error processing symbol ${sym}:`, err.message);
                     results.push({ symbol: sym, average_volume_20d: null, error: err.message });
                 }
             }
@@ -61,31 +57,35 @@ export default async function handler(req, res) {
             return res.status(200).json({
                 symbols: results,
                 days: 20,
-                total_symbols: results.length
+                total_symbols: results.length,
             });
+        } catch (err) {
+            console.error('Volume-all error:', err);
+            return res.status(500).json({ error: 'Failed to fetch all symbols volume' });
         }
+    }
 
-        // Case: /api/volume?symbol=...
-        const symbol = url.searchParams.get('symbol');
-        if (!symbol) {
-            return res.status(400).json({ error: 'Missing symbol parameter' });
-        }
+    // CASE: /api/volume?symbol=XYZ (single symbol)
+    const symbol = url.searchParams.get('symbol');
+    if (!symbol) {
+        return res.status(400).json({ error: 'Missing symbol parameter' });
+    }
 
-        let days = parseInt(url.searchParams.get('days'), 10);
-        if (isNaN(days) || days < 1) days = 20;
+    let days = parseInt(url.searchParams.get('days'), 10);
+    if (isNaN(days) || days < 1) days = 20;
 
+    try {
         const avgVolume = await getAverageVolume(supabase, symbol.toUpperCase(), days);
         if (avgVolume === null) {
             return res.status(404).json({ error: `No volume data found for symbol ${symbol}` });
         }
-
         return res.status(200).json({
             symbol: symbol.toUpperCase(),
             average_volume: avgVolume,
-            days_used: days
+            days_used: days,
         });
     } catch (err) {
-        console.error('Unhandled error in volume.js:', err);
-        return res.status(500).json({ error: 'Internal server error', details: err.message });
+        console.error('Volume error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 }
