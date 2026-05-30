@@ -36,32 +36,25 @@ export default async function handler(req, res) {
     if (pathname.endsWith('/all')) {
         try {
             // Get all distinct symbols – fetch many rows and deduplicate
-            const { data: allRows, error: fetchError } = await supabase
-                .from('prices')
-                .select('symbol')
-                .limit(10000); // high enough to cover all symbols
-            if (fetchError) throw fetchError;
+            const { data, error } = await supabase
+                .from('technical_indicators')
+                .select('symbol, avg_volume_20d')
+                .order("symbol");
+            if (error) throw error;
 
-            const uniqueSymbols = [...new Set(allRows.map(row => row.symbol))];
-            const results = [];
-
-            for (const sym of uniqueSymbols) {
-                try {
-                    const avgVol = await getAverageVolume(supabase, sym, 20);
-                    results.push({ symbol: sym, average_volume_20d: avgVol });
-                } catch (err) {
-                    results.push({ symbol: sym, average_volume_20d: null, error: err.message });
-                }
-            }
+            const symbols = data.map(row => ({
+                symbol: row.symbol,
+                average_volume_20d: row.avg_volume_20d,
+            }))
 
             return res.status(200).json({
-                symbols: results,
+                symbols: symbols,
                 days: 20,
-                total_symbols: results.length,
+                total_symbols: symbols.length,
             });
         } catch (err) {
             console.error('Volume-all error:', err);
-            return res.status(500).json({ error: 'Failed to fetch all symbols volume' });
+            return res.status(500).json({ error: 'Failed to fetch volume data from precomputed table' });
         }
     }
 
@@ -81,7 +74,7 @@ export default async function handler(req, res) {
         }
         return res.status(200).json({
             symbol: symbol.toUpperCase(),
-            average_volume: avgVolume,
+            average_volume_20d: avgVolume,
             days_used: days,
         });
     } catch (err) {
