@@ -124,6 +124,14 @@ function detectCrossover(fastMA, slowMA) {
     return { status, signal, fast: fastNow, slow: slowNow };
 }
 
+// Helper for average volume (20 days)
+function getAverageVolume(volumes) {
+    if (!volumes.length) return null;
+    const last20 = volumes.slice(-20);
+    const sum = last20.reduce((a, b) => a + b, 0);
+    return Math.round(sum / last20.length);
+}
+
 // ------------------------------------------------------------
 // Process a single symbol
 // ------------------------------------------------------------
@@ -143,6 +151,10 @@ async function processSymbol(supabase, symbol, limit = 200) {
         const high = data.map(d => parseFloat(d.high));
         const low = data.map(d => parseFloat(d.low));
         const vol = data.map(d => parseInt(d.volume, 10));
+
+        // Volume stats
+        const avgVolume20d = getAverageVolume(vol);
+        const latestVolume = vol[vol.length - 1];
 
         const sma50 = SMA(close, 50);
         const sma200 = SMA(close, 200);
@@ -175,6 +187,8 @@ async function processSymbol(supabase, symbol, limit = 200) {
             atr_14: atr[last] ? parseFloat(atr[last].toFixed(2)) : null,
             obv: obv[last] ? Math.round(obv[last]) : null,
             latest_close: parseFloat(close[last].toFixed(2)),
+            avg_volume_20d: avgVolume20d,
+            latest_volume: latestVolume,
             golden_cross_fast: golden.fast ? parseFloat(golden.fast.toFixed(2)) : null,
             golden_cross_slow: golden.slow ? parseFloat(golden.slow.toFixed(2)) : null,
             golden_cross_status: golden.status,
