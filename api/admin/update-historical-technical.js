@@ -118,21 +118,43 @@ function getAverageVolume(volumes, currentIndex, days = 20) {
 // ------------------------------------------------------------
 async function processSymbolHistory(supabase, symbol) {
   try {
-    // Fetch all data for this symbol (oldest to newest)
-    const { data, error } = await supabase
-      .from('prices')
-      .select('date, open, high, low, close, volume')
-      .eq('symbol', symbol)
-      .order('date', { ascending: true }); // oldest first
+    // Fetch ALL data for this symbol using pagination
+    let allData = [];
+    let from = 0;
+    const pageSize = 1000;
+    let hasMore = true;
 
-    if (error) throw error;
-    if (!data || data.length < 50) throw new Error(`Insufficient data (${data?.length || 0} rows)`);
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('prices')
+        .select('date, open, high, low, close, volume')
+        .eq('symbol', symbol)
+        .order('date', { ascending: true })
+        .range(from, from + pageSize - 1);
 
-    const dates = data.map(d => d.date);
-    const close = data.map(d => parseFloat(d.close));
-    const high = data.map(d => parseFloat(d.high));
-    const low = data.map(d => parseFloat(d.low));
-    const volume = data.map(d => parseInt(d.volume, 10));
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+      
+      allData.push(...data);
+      
+      if (data.length < pageSize) {
+        hasMore = false;
+      } else {
+        from += pageSize;
+      }
+    }
+
+    if (!allData || allData.length < 50) {
+      throw new Error(`Insufficient data (${allData?.length || 0} rows)`);
+    }
+
+    const dates = allData.map(d => d.date);
+    const close = allData.map(d => parseFloat(d.close));
+    const high = allData.map(d => parseFloat(d.high));
+    const low = allData.map(d => parseFloat(d.low));
+    const volume = allData.map(d => parseInt(d.volume, 10));
+
+    console.log(`Processing ${symbol}: ${dates.length} records`);
 
     // Calculate all indicators for every date
     const sma50 = SMA(close, 50);
@@ -151,7 +173,7 @@ async function processSymbolHistory(supabase, symbol) {
     const records = [];
     for (let i = 0; i < dates.length; i++) {
       const avgVolume20d = getAverageVolume(volume, i, 20);
-
+      
       records.push({
         symbol,
         date: dates[i],
@@ -174,13 +196,16 @@ async function processSymbolHistory(supabase, symbol) {
       });
     }
 
-    // Upsert all records (insert or update if exists)
-    const { error: upsertError } = await supabase
-      .from('historical_technical_indicators')
-      .upsert(records, { onConflict: 'symbol,date' });
-
-    if (upsertError) throw upsertError;
-
+    // Upsert records in batches (to avoid payload size limits)
+    const batchSize = 500;
+    for (let i = 0; i < records.length; i += batchSize) {
+      const batch = records.slice(i, i + batchSize);
+      const { error: upsertError } = await supabase
+        .from('historical_technical_indicators')
+        .upsert(batch, { onConflict: 'symbol,date' });
+      if (upsertError) throw upsertError;
+    }
+    
     return { symbol, status: 'success', records_count: records.length };
   } catch (err) {
     return { symbol, status: 'failed', error: err.message };
