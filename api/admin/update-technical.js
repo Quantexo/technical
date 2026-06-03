@@ -135,7 +135,7 @@ function getAverageVolume(volumes) {
 // ------------------------------------------------------------
 // Process a single symbol
 // ------------------------------------------------------------
-async function processSymbol(supabase, symbol, limit = 300) {
+async function processSymbol(supabase, symbol, limit = 500) {
     try {
         const { data, error } = await supabase
             .from('prices')
