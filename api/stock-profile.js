@@ -87,7 +87,18 @@ export default async function handler(req, res) {
         });
     }
   } catch (err) {
-    console.error(`[stock-profile] route=${route} error:`, err);
-    return res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    console.warn(`[stock-profile] Upstream error for route="${route}":`, err.message);
+    
+    // Graceful fallbacks so frontend doesn't receive 500 errors and can use its built-in fallbacks
+    const fallbacks = {
+      'profile': {},
+      'alpha-beta': { value: [] },
+      'broker-top-holding': {},
+      'broker-snapshot': [],
+      'market-depth': {},
+      'report': {}
+    };
+
+    return res.status(200).json(fallbacks[route] || {});
   }
 }
