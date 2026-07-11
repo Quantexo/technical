@@ -1,25 +1,53 @@
 {
   "functions": {
-    "api/technical.js": {
-      "maxDuration": 10
-    }
+    "api/screener.js": { "maxDuration": 15 },
+    "api/technical.js": { "maxDuration": 10 },
+    "api/stock-profile.js": { "maxDuration": 15 }
   },
   "rewrites": [
-    { "source": "/api/volume/all", "destination": "/api/volume" },
-    { "source": "/api/volume", "destination": "/api/volume" },
-    { "source": "/api/screener/all", "destination": "/api/screener-all" },
     { "source": "/market-status", "destination": "/api/market-status" },
-    { "source": "/charts/stock-chart/index/1D/:symbol", "destination": "/api/charts/index-chart?symbol=:symbol" },
-    { "source": "/charts/stock-chart/:symbol", "destination": "/api/charts/stock-chart?symbol=:symbol" },
-    { "source": "/market-info/announcements", "destination": "/api/market-info/announcements" },
-    { "source": "/market-info/ipo/general", "destination": "/api/market-info/offering?type=0&for=2" },
-    { "source": "/market-info/ipo/local", "destination": "/api/market-info/offering?type=0&for=0" },
-    { "source": "/market-info/ipo/foreign", "destination": "/api/market-info/offering?type=0&for=1" },
-    { "source": "/market-info/right-share", "destination": "/api/market-info/offering?type=2&for=2" },
-    { "source": "/market-info/fpo", "destination": "/api/market-info/offering?type=1&for=2" },
-    { "source": "/market-info/mutual-fund-offering", "destination": "/api/market-info/offering?type=3&for=2" },
-    { "source": "/market-info/debenture-offering", "destination": "/api/market-info/offering?type=4&for=2" },
-    { "source": "/stock-profile/market-depth/:symbol", "destination": "/api/stock-profile/market-depth?symbol=:symbol" },
+
+    { "source": "/api/core/live-nepse",       "destination": "/api/core?route=live-nepse" },
+    { "source": "/api/core/market-turnover",  "destination": "/api/core?route=market-turnover" },
+    { "source": "/api/core/index-live",       "destination": "/api/core?route=index-live" },
+    { "source": "/api/core/subindex-live",    "destination": "/api/core?route=subindex-live" },
+    { "source": "/api/core/homepage-data",    "destination": "/api/core?route=homepage-data" },
+    { "source": "/api/core/floorsheet/totals","destination": "/api/core?route=floorsheet-totals" },
+    { "source": "/api/core/floorsheet",       "destination": "/api/core?route=floorsheet" },
+
+    { "source": "/charts/stock-chart/index/1D/:symbol", "destination": "/api/charts?route=index-chart&symbol=:symbol" },
+    { "source": "/charts/stock-chart/:symbol",           "destination": "/api/charts?route=stock-chart&symbol=:symbol" },
+    { "source": "/api/charts/stock-chart",   "destination": "/api/charts?route=stock-chart" },
+    { "source": "/api/charts/index-chart",   "destination": "/api/charts?route=index-chart" },
+
+    { "source": "/market-info/announcements",          "destination": "/api/market-info?route=announcements" },
+    { "source": "/market-info/ipo/general",            "destination": "/api/market-info?route=offering&type=0&for=2" },
+    { "source": "/market-info/ipo/local",              "destination": "/api/market-info?route=offering&type=0&for=0" },
+    { "source": "/market-info/ipo/foreign",            "destination": "/api/market-info?route=offering&type=0&for=1" },
+    { "source": "/market-info/right-share",            "destination": "/api/market-info?route=offering&type=2&for=2" },
+    { "source": "/market-info/fpo",                    "destination": "/api/market-info?route=offering&type=1&for=2" },
+    { "source": "/market-info/mutual-fund-offering",   "destination": "/api/market-info?route=offering&type=3&for=2" },
+    { "source": "/market-info/debenture-offering",     "destination": "/api/market-info?route=offering&type=4&for=2" },
+    { "source": "/api/market-info/announcements",      "destination": "/api/market-info?route=announcements" },
+    { "source": "/api/market-info/offering",           "destination": "/api/market-info?route=offering" },
+
+    { "source": "/stock-profile/alpha-beta",        "destination": "/api/stock-profile?route=alpha-beta" },
+    { "source": "/stock-profile/broker-top-holding","destination": "/api/stock-profile?route=broker-top-holding" },
+    { "source": "/stock-profile/broker-snapshot",   "destination": "/api/stock-profile?route=broker-snapshot" },
+    { "source": "/stock-profile/market-depth/:symbol","destination": "/api/stock-profile?route=market-depth&symbol=:symbol" },
+    { "source": "/stock-profile/market-depth",      "destination": "/api/stock-profile?route=market-depth" },
+    { "source": "/stock-profile/report",            "destination": "/api/stock-profile?route=report" },
+    { "source": "/stock-profile",                   "destination": "/api/stock-profile?route=profile" },
+    { "source": "/api/stock-profile/alpha-beta",        "destination": "/api/stock-profile?route=alpha-beta" },
+    { "source": "/api/stock-profile/broker-top-holding","destination": "/api/stock-profile?route=broker-top-holding" },
+    { "source": "/api/stock-profile/broker-snapshot",   "destination": "/api/stock-profile?route=broker-snapshot" },
+    { "source": "/api/stock-profile/market-depth",      "destination": "/api/stock-profile?route=market-depth" },
+    { "source": "/api/stock-profile/report",            "destination": "/api/stock-profile?route=report" },
+
+    { "source": "/api/screener-all",    "destination": "/api/screener?all=1" },
+    { "source": "/api/screener/all",    "destination": "/api/screener?all=1" },
+    { "source": "/api/volume/all",      "destination": "/api/volume?all=1" },
+
     { "source": "/(.*)", "destination": "/api/$1" }
   ]
 }
