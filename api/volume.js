@@ -28,12 +28,11 @@ export default async function handler(req, res) {
     }
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Parse the full request URL to detect /all endpoint
+    // Parse query params
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const pathname = url.pathname;
 
-    // CASE: /api/volume/all (rewritten from /api/volume/all to /api/volume)
-    if (pathname.endsWith('/all')) {
+    // CASE: ?all=1 — return all symbols' average volume
+    if (url.searchParams.get('all') === '1') {
         try {
             // Get all distinct symbols – fetch many rows and deduplicate
             const { data, error } = await supabase
