@@ -208,8 +208,8 @@ async function processSymbol(supabase, symbol, limit = 500) {
         const atr = ATR(high, low, close, 14);
         const obv = OBV(close, vol);
 
-        const adLine = AccumulationDistribution(high, low, close, volume);
-        const anchoredVwap = AnchoredVWAP(close, volume);
+        const adLine = AccumulationDistribution(high, low, close, vol);
+        const anchoredVwap = AnchoredVWAP(close, vol);
 
         const last = close.length - 1;
         const lastDate = data[last].date;
@@ -223,6 +223,8 @@ async function processSymbol(supabase, symbol, limit = 500) {
             macd_histogram: histogram[last] ? parseFloat(histogram[last].toFixed(4)) : null,
             atr_14: atr[last] ? parseFloat(atr[last].toFixed(2)) : null,
             obv: obv[last] ? Math.round(obv[last]) : null,
+            ad_line: adLine[last] ? parseFloat(adLine[last].toFixed(2)) : null,
+            anchored_vwap: anchoredVwap[last] ? parseFloat(anchoredVwap[last].toFixed(2)) : null,
             latest_close: parseFloat(close[last].toFixed(2)),
             avg_volume_20d: avgVolume20d,
             latest_volume: latestVolume,
