@@ -22,8 +22,9 @@ export default async function handler(req, res) {
   try {
     switch (route) {
       case 'live-nepse': {
-        const data = await proxy('https://nepselytics-6d61dea19f30.herokuapp.com/api/nepselytics/live-nepse');
-        return res.status(200).json(data);
+        const data = await proxy('https://sharehubnepal.com/live/api/v2/nepselive/home-page-data');
+        const stocks = data?.stockSummary?.data || [];
+        return res.status(200).json(stocks);
       }
 
       case 'market-turnover': {
