@@ -113,6 +113,36 @@ function getAverageVolume(volumes, currentIndex, days = 20) {
   return Math.round(sum / slice.length);
 }
 
+// Accumulation/Distribution Line
+function AccumulationDistribution(high, low, close, volume) {
+  const ad = new Array(close.length).fill(0);
+  let prevAD = 0;
+  for (let i = 0; i < close.length; i++) {
+    const range = high[i] - low[i];
+    if (range === 0) {
+      ad[i] = prevAD;
+      continue;
+    }
+    const multiplier = ((close[i] - low[i]) - (high[i] - close[i])) / range;
+    const moneyFlow = multiplier * volume[i];
+    prevAD += moneyFlow;
+    ad[i] = prevAD;
+  }
+  return ad;
+}
+
+// Anchored VWAP (anchored at the very first date for this symbol)
+function AnchoredVWAP(close, volume) {
+  const vwap = new Array(close.length).fill(null);
+  let cumPV = 0, cumVol = 0;
+  for (let i = 0; i < close.length; i++) {
+    cumPV += close[i] * volume[i];
+    cumVol += volume[i];
+    vwap[i] = cumVol > 0 ? cumPV / cumVol : null;
+  }
+  return vwap;
+}
+
 // ------------------------------------------------------------
 // Process a single symbol's entire history
 // ------------------------------------------------------------
@@ -134,9 +164,9 @@ async function processSymbolHistory(supabase, symbol) {
 
       if (error) throw error;
       if (!data || data.length === 0) break;
-      
+
       allData.push(...data);
-      
+
       if (data.length < pageSize) {
         hasMore = false;
       } else {
@@ -168,12 +198,14 @@ async function processSymbolHistory(supabase, symbol) {
     const { macd, signal, histogram } = MACD(close);
     const atr = ATR(high, low, close, 14);
     const obv = OBV(close, volume);
+    const adLine = AccumulationDistribution(high, low, close, volume);
+    const anchoredVwap = AnchoredVWAP(close, volume);
 
     // Build array of records to insert
     const records = [];
     for (let i = 0; i < dates.length; i++) {
       const avgVolume20d = getAverageVolume(volume, i, 20);
-      
+
       records.push({
         symbol,
         date: dates[i],
@@ -193,6 +225,8 @@ async function processSymbolHistory(supabase, symbol) {
         avg_volume_20d: avgVolume20d,
         volume: volume[i],
         close: parseFloat(close[i].toFixed(2)),
+        ad_line: adLine[i] ? parseFloat(adLine[i].toFixed(2)) : null,
+        anchored_vwap: anchoredVwap[i] ? parseFloat(anchoredVwap[i].toFixed(2)) : null,
       });
     }
 
@@ -205,7 +239,7 @@ async function processSymbolHistory(supabase, symbol) {
         .upsert(batch, { onConflict: 'symbol,date' });
       if (upsertError) throw upsertError;
     }
-    
+
     return { symbol, status: 'success', records_count: records.length };
   } catch (err) {
     return { symbol, status: 'failed', error: err.message };
