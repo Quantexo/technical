@@ -5,9 +5,21 @@
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
     { "source": "/api/volume/all", "destination": "/api/volume" },
     { "source": "/api/volume", "destination": "/api/volume" },
-    { "source": "/api/screener/all", "destination": "/api/screener-all" }
+    { "source": "/api/screener/all", "destination": "/api/screener-all" },
+    { "source": "/market-status", "destination": "/api/market-status" },
+    { "source": "/charts/stock-chart/index/1D/:symbol", "destination": "/api/charts/index-chart?symbol=:symbol" },
+    { "source": "/charts/stock-chart/:symbol", "destination": "/api/charts/stock-chart?symbol=:symbol" },
+    { "source": "/market-info/announcements", "destination": "/api/market-info/announcements" },
+    { "source": "/market-info/ipo/general", "destination": "/api/market-info/offering?type=0&for=2" },
+    { "source": "/market-info/ipo/local", "destination": "/api/market-info/offering?type=0&for=0" },
+    { "source": "/market-info/ipo/foreign", "destination": "/api/market-info/offering?type=0&for=1" },
+    { "source": "/market-info/right-share", "destination": "/api/market-info/offering?type=2&for=2" },
+    { "source": "/market-info/fpo", "destination": "/api/market-info/offering?type=1&for=2" },
+    { "source": "/market-info/mutual-fund-offering", "destination": "/api/market-info/offering?type=3&for=2" },
+    { "source": "/market-info/debenture-offering", "destination": "/api/market-info/offering?type=4&for=2" },
+    { "source": "/stock-profile/market-depth/:symbol", "destination": "/api/stock-profile/market-depth?symbol=:symbol" },
+    { "source": "/(.*)", "destination": "/api/$1" }
   ]
 }
