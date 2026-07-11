@@ -247,7 +247,7 @@ async function processSymbolHistory(supabase, symbol) {
 }
 
 // ------------------------------------------------------------
-// Main handler
+// Main handler (now supports pagination via offset & limit)
 // ------------------------------------------------------------
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -257,7 +257,7 @@ export default async function handler(req, res) {
 
   // Authentication
   const secret = req.query.secret;
-  if (secret !== 'test123') { // Change to your secret
+  if (secret !== 'test123') {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
@@ -268,21 +268,17 @@ export default async function handler(req, res) {
   }
   const supabase = createClient(supabaseUrl, supabaseKey);
 
-  // Optional: limit to a specific symbol
+  // ----- Pagination parameters -----
+  const offset = parseInt(req.query.offset) || 0;
+  const limit = parseInt(req.query.limit) || 5;   // process 5 symbols per request (adjust as needed)
   const specificSymbol = req.query.symbol;
 
   try {
-    // Get distinct symbols
-    let query = supabase.from('prices').select('symbol');
-    if (specificSymbol) {
-      query = query.eq('symbol', specificSymbol);
-    }
-
+    // 1. Get list of all distinct symbols (sorted)
     let allRows = [];
     let from = 0;
     const pageSize = 1000;
     let hasMore = true;
-
     while (hasMore) {
       const { data, error } = await supabase
         .from('prices')
@@ -294,30 +290,55 @@ export default async function handler(req, res) {
       if (data.length < pageSize) hasMore = false;
       from += pageSize;
     }
+    const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))].sort();
+    const totalSymbols = uniqueSymbols.length;
 
-    const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))];
-    console.log(`Processing ${uniqueSymbols.length} symbols`);
+    // If a specific symbol is given, process only that one
+    let symbolsToProcess = [];
+    if (specificSymbol) {
+      if (!uniqueSymbols.includes(specificSymbol.toUpperCase())) {
+        return res.status(404).json({ error: `Symbol ${specificSymbol} not found` });
+      }
+      symbolsToProcess = [specificSymbol.toUpperCase()];
+    } else {
+      // Slice based on offset and limit
+      symbolsToProcess = uniqueSymbols.slice(offset, offset + limit);
+    }
 
-    // Process with concurrency 2 (heavy operation)
+    if (symbolsToProcess.length === 0) {
+      return res.status(200).json({
+        message: 'No more symbols to process',
+        total_symbols: totalSymbols,
+        processed: 0,
+        next_offset: offset,
+      });
+    }
+
+    // 2. Process the selected symbols
     const results = [];
-    const concurrency = 2;
-    const queue = [...uniqueSymbols];
+    const concurrency = 1; // process one at a time to avoid timeouts
+    const queue = [...symbolsToProcess];
 
     async function worker() {
       while (queue.length) {
         const sym = queue.shift();
         const result = await processSymbolHistory(supabase, sym);
         results.push(result);
-        console.log(`Completed: ${sym} (${results.length}/${uniqueSymbols.length})`);
+        console.log(`Completed: ${sym} (${results.length}/${symbolsToProcess.length})`);
       }
     }
 
     const workers = Array(concurrency).fill().map(() => worker());
     await Promise.all(workers);
 
+    // 3. Compute next offset for the next batch
+    const nextOffset = specificSymbol ? null : offset + symbolsToProcess.length;
+
     return res.status(200).json({
-      message: 'Historical update completed',
-      total_symbols: uniqueSymbols.length,
+      message: 'Batch processed',
+      total_symbols: totalSymbols,
+      processed_symbols: symbolsToProcess.length,
+      next_offset: nextOffset,
       results,
     });
   } catch (err) {
