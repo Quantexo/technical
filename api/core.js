@@ -23,7 +23,7 @@ export default async function handler(req, res) {
     switch (route) {
       case 'live-nepse': {
         const data = await proxy('https://sharehubnepal.com/live/api/v2/nepselive/home-page-data');
-        const stocks = data?.stockSummary?.data || [];
+        const stocks = data?.liveCompanyData || [];
         return res.status(200).json(stocks);
       }
 
