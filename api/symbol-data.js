@@ -1,52 +1,62 @@
+import { createClient } from '@supabase/supabase-js';
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const { symbol } = req.query;
+  const { symbol, start_date, end_date } = req.query;
 
   if (!symbol) {
     return res.status(400).json({ error: 'Missing symbol parameter' });
   }
 
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    return res.status(500).json({ error: 'Supabase credentials missing' });
+  }
+  const supabase = createClient(supabaseUrl, supabaseKey);
+
   try {
     const symbolUpper = symbol.toUpperCase();
-    const url = `https://sharehubnepal.com/data/api/v1/price-history/graph/${symbolUpper}?time=1Y`;
-    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    
+    let query = supabase
+      .from('prices')
+      .select('date, open, high, low, close, volume')
+      .eq('symbol', symbolUpper)
+      .order('date', { ascending: true });
 
-    if (!response.ok) {
-      return res.status(response.status).json({ error: `Failed to fetch historical data for ${symbolUpper}` });
+    // Apply date filters
+    if (start_date) {
+      query = query.gte('date', start_date);
+    } else {
+      // Default to last 1 year if start_date is not specified
+      const oneYearAgo = new Date();
+      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+      const formattedDate = oneYearAgo.toISOString().split('T')[0];
+      query = query.gte('date', formattedDate);
     }
 
-    const rawData = await response.json();
-    const mappedCandles = [];
-
-    for (const d of rawData) {
-      const tVal = d.time || d.date;
-      if (!tVal) continue;
-
-      let dateStr;
-      if (typeof tVal === 'number') {
-        dateStr = new Date(tVal * 1000).toISOString().split('T')[0];
-      } else {
-        dateStr = String(tVal).split('T')[0];
-      }
-
-      mappedCandles.push({
-        Date: dateStr,
-        Open: parseFloat(d.openPrice || d.open || d.contractRate || d.price || d.y || d.value || 0),
-        High: parseFloat(d.high || d.highPrice || d.contractRate || d.price || d.y || d.value || 0),
-        Low: parseFloat(d.low || d.lowPrice || d.contractRate || d.price || d.y || d.value || 0),
-        Close: parseFloat(d.contractRate || d.price || d.close || d.closePrice || d.y || d.value || 0),
-        Volume: parseFloat(d.volume || d.vol || d.turnover || 0)
-      });
+    if (end_date) {
+      query = query.lte('date', end_date);
     }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const mappedCandles = (data || []).map(d => ({
+      Date: d.date,
+      Open: parseFloat(d.open || 0),
+      High: parseFloat(d.high || 0),
+      Low: parseFloat(d.low || 0),
+      Close: parseFloat(d.close || 0),
+      Volume: parseInt(d.volume || 0, 10)
+    }));
 
     return res.status(200).json({
       success: true,
-      data: {
-        data: mappedCandles
-      }
+      data: mappedCandles
     });
   } catch (err) {
     console.error('Symbol-data error:', err);
