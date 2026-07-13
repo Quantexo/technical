@@ -175,7 +175,7 @@ async function processSymbolHistory(supabase, symbol) {
       }
     }
 
-    if (!allData || allData.length < 50) {
+    if (!allData || allData.length < 2) {
       throw new Error(`Insufficient data (${allData?.length || 0} rows)`);
     }
 

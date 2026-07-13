@@ -179,7 +179,7 @@ async function processSymbol(supabase, symbol, limit = 500) {
             .order('date', { ascending: false })
             .limit(limit);
         if (error) throw error;
-        if (!data || data.length < 50) throw new Error(`Insufficient data (${data?.length || 0} rows)`);
+        if (!data || data.length < 2) throw new Error(`Insufficient data (${data?.length || 0} rows)`);
         data.reverse();
 
         const close = data.map(d => parseFloat(d.close));
