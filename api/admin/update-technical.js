@@ -210,7 +210,7 @@ async function processSymbol(supabase, symbol, limit = 500) {
         const obv = OBV(close, vol);
 
         const adLine = AccumulationDistribution(high, low, close, vol);
-        const anchoredVwap = AnchoredVWAP(high, low, close, volume);
+        const anchoredVwap = AnchoredVWAP(high, low, close, vol);
 
         const last = close.length - 1;
         const lastDate = data[last].date;
