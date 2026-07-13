@@ -138,7 +138,7 @@ function AnchoredVWAP(high, low, close, volume) {
         vwap[i] = cumVol > 0 ? cumPV / cumVol : null;
     }
     return vwap;
-} S
+}
 
 function detectCrossover(fastMA, slowMA) {
     if (fastMA.length < 2 || slowMA.length < 2) return { status: null, signal: null, fast: null, slow: null };
