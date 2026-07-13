@@ -132,11 +132,12 @@ function AccumulationDistribution(high, low, close, volume) {
 }
 
 // Anchored VWAP (anchored at the very first date for this symbol)
-function AnchoredVWAP(close, volume) {
+function AnchoredVWAP(high, low, close, volume) {
   const vwap = new Array(close.length).fill(null);
   let cumPV = 0, cumVol = 0;
   for (let i = 0; i < close.length; i++) {
-    cumPV += close[i] * volume[i];
+    const typicalPrice = (high[i] + low[i] + close[i]) / 3;  // ✅ HLC3
+    cumPV += typicalPrice * volume[i];
     cumVol += volume[i];
     vwap[i] = cumVol > 0 ? cumPV / cumVol : null;
   }
@@ -199,7 +200,7 @@ async function processSymbolHistory(supabase, symbol) {
     const atr = ATR(high, low, close, 14);
     const obv = OBV(close, volume);
     const adLine = AccumulationDistribution(high, low, close, volume);
-    const anchoredVwap = AnchoredVWAP(close, volume);
+    const anchoredVwap = AnchoredVWAP(high, low, close, volume);
 
     // Build array of records to insert
     const records = [];

@@ -128,16 +128,17 @@ function AccumulationDistribution(high, low, close, volume) {
 // ------------------------------------------------------------
 // Anchored VWAP (anchored at the first date of the symbol)
 // ------------------------------------------------------------
-function AnchoredVWAP(close, volume) {
+function AnchoredVWAP(high, low, close, volume) {
     const vwap = new Array(close.length).fill(null);
     let cumPV = 0, cumVol = 0;
     for (let i = 0; i < close.length; i++) {
-        cumPV += close[i] * volume[i];
+        const typicalPrice = (high[i] + low[i] + close[i]) / 3;  // ✅ HLC3
+        cumPV += typicalPrice * volume[i];
         cumVol += volume[i];
         vwap[i] = cumVol > 0 ? cumPV / cumVol : null;
     }
     return vwap;
-}
+} S
 
 function detectCrossover(fastMA, slowMA) {
     if (fastMA.length < 2 || slowMA.length < 2) return { status: null, signal: null, fast: null, slow: null };
@@ -209,7 +210,7 @@ async function processSymbol(supabase, symbol, limit = 500) {
         const obv = OBV(close, vol);
 
         const adLine = AccumulationDistribution(high, low, close, vol);
-        const anchoredVwap = AnchoredVWAP(close, vol);
+        const anchoredVwap = AnchoredVWAP(high, low, close, volume);
 
         const last = close.length - 1;
         const lastDate = data[last].date;
