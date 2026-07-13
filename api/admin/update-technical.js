@@ -126,13 +126,13 @@ function AccumulationDistribution(high, low, close, volume) {
 }
 
 // ------------------------------------------------------------
-// Anchored VWAP (anchored at the first date of the symbol)
+// Anchored VWAP (HLC3) – anchored at first date
 // ------------------------------------------------------------
 function AnchoredVWAP(high, low, close, volume) {
     const vwap = new Array(close.length).fill(null);
     let cumPV = 0, cumVol = 0;
     for (let i = 0; i < close.length; i++) {
-        const typicalPrice = (high[i] + low[i] + close[i]) / 3;  // ✅ HLC3
+        const typicalPrice = (high[i] + low[i] + close[i]) / 3;
         cumPV += typicalPrice * volume[i];
         cumVol += volume[i];
         vwap[i] = cumVol > 0 ? cumPV / cumVol : null;
@@ -159,7 +159,7 @@ function detectCrossover(fastMA, slowMA) {
     return { status, signal, fast: fastNow, slow: slowNow };
 }
 
-// Helper for average volume (20 days)
+// Helper for average volume (20 days) from the whole array (takes last 20)
 function getAverageVolume(volumes) {
     if (!volumes.length) return null;
     const last20 = volumes.slice(-20);
@@ -168,29 +168,41 @@ function getAverageVolume(volumes) {
 }
 
 // ------------------------------------------------------------
-// Process a single symbol
+// Process a single symbol – fetches ALL data (no 500-day limit)
 // ------------------------------------------------------------
-async function processSymbol(supabase, symbol, limit = 500) {
+async function processSymbolFull(supabase, symbol) {
     try {
-        const { data, error } = await supabase
-            .from('prices')
-            .select('date, open, high, low, close, volume')
-            .eq('symbol', symbol)
-            .order('date', { ascending: false })
-            .limit(limit);
-        if (error) throw error;
-        if (!data || data.length < 2) throw new Error(`Insufficient data (${data?.length || 0} rows)`);
-        data.reverse();
+        // Fetch all data for this symbol using pagination
+        let allData = [];
+        let from = 0;
+        const pageSize = 1000;
+        let hasMore = true;
 
-        const close = data.map(d => parseFloat(d.close));
-        const high = data.map(d => parseFloat(d.high));
-        const low = data.map(d => parseFloat(d.low));
-        const vol = data.map(d => parseInt(d.volume, 10));
+        while (hasMore) {
+            const { data, error } = await supabase
+                .from('prices')
+                .select('date, open, high, low, close, volume')
+                .eq('symbol', symbol)
+                .order('date', { ascending: true })
+                .range(from, from + pageSize - 1);
 
-        // Volume stats
-        const avgVolume20d = getAverageVolume(vol);
-        const latestVolume = vol[vol.length - 1];
+            if (error) throw error;
+            if (!data || data.length === 0) break;
+            allData.push(...data);
+            if (data.length < pageSize) hasMore = false;
+            from += pageSize;
+        }
 
+        if (!allData || allData.length < 2) {
+            throw new Error(`Insufficient data (${allData?.length || 0} rows)`);
+        }
+
+        const close = allData.map(d => parseFloat(d.close));
+        const high = allData.map(d => parseFloat(d.high));
+        const low = allData.map(d => parseFloat(d.low));
+        const vol = allData.map(d => parseInt(d.volume, 10));
+
+        // Compute indicators on the full history
         const sma50 = SMA(close, 50);
         const sma200 = SMA(close, 200);
         const ema9 = EMA(close, 9);
@@ -198,22 +210,23 @@ async function processSymbol(supabase, symbol, limit = 500) {
         const ema20 = EMA(close, 20);
         const ema50 = EMA(close, 50);
         const ema100 = EMA(close, 100);
+        const rsi = RSI(close, 14);
+        const { macd, signal, histogram } = MACD(close);
+        const atr = ATR(high, low, close, 14);
+        const obv = OBV(close, vol);
+        const adLine = AccumulationDistribution(high, low, close, vol);
+        const anchoredVwap = AnchoredVWAP(high, low, close, vol);
 
+        // Crossovers (using full arrays)
         const golden = detectCrossover(sma50, sma200);
         const short = detectCrossover(ema9, ema21);
         const swing = detectCrossover(ema20, ema50);
         const medium = detectCrossover(ema50, ema100);
 
-        const rsi = RSI(close, 14);
-        const { macd, signal, histogram } = MACD(close);
-        const atr = ATR(high, low, close, 14);
-        const obv = OBV(close, vol);
-
-        const adLine = AccumulationDistribution(high, low, close, vol);
-        const anchoredVwap = AnchoredVWAP(high, low, close, vol);
-
         const last = close.length - 1;
-        const lastDate = data[last].date;
+        const lastDate = allData[last].date;
+        const avgVolume20d = getAverageVolume(vol);
+        const latestVolume = vol[vol.length - 1];
 
         return {
             symbol,
@@ -252,25 +265,26 @@ async function processSymbol(supabase, symbol, limit = 500) {
 }
 
 // ------------------------------------------------------------
-// Main handler
+// Main handler – supports offset and limit for symbol batching
 // ------------------------------------------------------------
 export default async function handler(req, res) {
-    // CORS (optional)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET');
-
     if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-    // ----- Authentication (temporary simple secret) -----
+    // Authentication
     const secret = req.query.secret;
-    // Change this to your own secret (alphanumeric only, no special chars)
     if (secret !== 'test123') {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
+    // Pagination parameters for symbols
+    const offset = parseInt(req.query.offset) || 0;
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50); // max 50 per batch
+
     const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Use service role key for write
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!supabaseUrl || !supabaseKey) {
         console.error('Missing Supabase credentials');
         return res.status(500).json({ error: 'Supabase credentials missing' });
@@ -278,7 +292,7 @@ export default async function handler(req, res) {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     try {
-        // Get all distinct symbols (paginated)
+        // 1. Get the full list of distinct symbols (sorted)
         let allRows = [];
         let from = 0;
         const pageSize = 1000;
@@ -294,34 +308,42 @@ export default async function handler(req, res) {
             if (data.length < pageSize) hasMore = false;
             from += pageSize;
         }
-        const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))];
-        console.log(`Found ${uniqueSymbols.length} symbols`);
+        const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))].sort();
+        const totalSymbols = uniqueSymbols.length;
 
-        // Process with concurrency 3 to avoid timeout / rate limits
-        const results = [];
-        const concurrency = 3;
-        const queue = [...uniqueSymbols];
-        async function worker() {
-            while (queue.length) {
-                const sym = queue.shift();
-                try {
-                    const indicators = await processSymbol(supabase, sym);
-                    const { error: upsertError } = await supabase
-                        .from('technical_indicators')
-                        .upsert(indicators, { onConflict: 'symbol' });
-                    if (upsertError) throw upsertError;
-                    results.push({ symbol: sym, status: 'success' });
-                } catch (err) {
-                    results.push({ symbol: sym, status: 'failed', error: err.message });
-                }
-            }
+        // 2. Slice the batch
+        const symbolsToProcess = uniqueSymbols.slice(offset, offset + limit);
+        if (symbolsToProcess.length === 0) {
+            return res.status(200).json({
+                message: 'No more symbols to process',
+                total_symbols: totalSymbols,
+                processed: 0,
+                next_offset: offset,
+            });
         }
-        const workers = Array(concurrency).fill().map(() => worker());
-        await Promise.all(workers);
 
+        // 3. Process symbols sequentially (to avoid timeouts)
+        const results = [];
+        for (const sym of symbolsToProcess) {
+            try {
+                const indicators = await processSymbolFull(supabase, sym);
+                const { error: upsertError } = await supabase
+                    .from('technical_indicators')
+                    .upsert(indicators, { onConflict: 'symbol' });
+                if (upsertError) throw upsertError;
+                results.push({ symbol: sym, status: 'success' });
+            } catch (err) {
+                results.push({ symbol: sym, status: 'failed', error: err.message });
+            }
+            console.log(`Processed ${sym} (${results.length}/${symbolsToProcess.length})`);
+        }
+
+        const nextOffset = offset + symbolsToProcess.length;
         return res.status(200).json({
-            message: 'Update completed',
-            total_symbols: uniqueSymbols.length,
+            message: 'Batch processed',
+            total_symbols: totalSymbols,
+            processed_symbols: symbolsToProcess.length,
+            next_offset: nextOffset,
             results,
         });
     } catch (err) {
