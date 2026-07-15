@@ -30,7 +30,7 @@ export default async function handler(req, res) {
 
   const route = req.query.route; // set via vercel.json rewrite
   const symbolsParam = req.query.symbols || req.query.symbol || '';
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
   const offset = parseInt(req.query.offset, 10) || 0;
 
   // Determine fields to select
