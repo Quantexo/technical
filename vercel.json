@@ -1,6 +1,5 @@
 {
   "functions": {
-    "api/screener.js": { "maxDuration": 15 },
     "api/indicators.js": { "maxDuration": 10 },
     "api/stock-profile.js": { "maxDuration": 15 }
   },
@@ -50,10 +49,6 @@
     { "source": "/api/indicators/volume",     "destination": "/api/indicators?route=volume" },
     { "source": "/api/indicators/ad_vwap",    "destination": "/api/indicators?route=ad_vwap" },
     { "source": "/api/indicators",            "destination": "/api/indicators" },
-
-    { "source": "/api/screener-all",    "destination": "/api/screener?all=1" },
-    { "source": "/api/screener/all",    "destination": "/api/screener?all=1" },
-    { "source": "/api/volume/all",      "destination": "/api/volume?all=1" },
 
     { "source": "/(.*)", "destination": "/api/$1" }
   ]
