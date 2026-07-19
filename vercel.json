@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/indicators.js": { "maxDuration": 10 },
-    "api/stock-profile.js": { "maxDuration": 15 }
+    "api/stock-profile.js": { "maxDuration": 15 },
+    "api/brokerHolding.js": { "maxDuration": 15 }
   },
   "rewrites": [
     { "source": "/market-status", "destination": "/api/market-status" },
@@ -49,6 +50,8 @@
     { "source": "/api/indicators/volume",     "destination": "/api/indicators?route=volume" },
     { "source": "/api/indicators/ad_vwap",    "destination": "/api/indicators?route=ad_vwap" },
     { "source": "/api/indicators",            "destination": "/api/indicators" },
+
+    { "source": "/api/broker-holding",        "destination": "/api/brokerHolding" },
 
     { "source": "/(.*)", "destination": "/api/$1" }
   ]
