@@ -172,8 +172,7 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
 
         case '1M':  startDate = formatDate(addDays(maxDate, -30));  break;
         case '3M':  startDate = formatDate(addDays(maxDate, -90));  break;
-        case '1Y':  startDate = formatDate(addDays(maxDate, -365)); break;
-        case '2Y':  startDate = formatDate(addDays(maxDate, -730)); break;
+        case '6M':  startDate = formatDate(addDays(maxDate, -180)); break;
         default:    throw new Error(`Invalid period: ${period}`);
     }
 
