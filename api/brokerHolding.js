@@ -107,25 +107,21 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
                 .from('broker_holding')
                 .select('date')
                 .order('date', { ascending: false })
-                .limit(1)
-                .range(6, 6);
+                .limit(4000);
             if (symbol) distinctQuery = distinctQuery.eq('symbol', symbol);
             if (broker_id) distinctQuery = distinctQuery.eq('broker_id', broker_id);
-            const { data: seventh, error: seventhError } = await distinctQuery;
-            if (seventhError) throw new Error(`Failed to get 7th trading day: ${seventhError.message}`);
-            if (!seventh || seventh.length === 0) {
-                const { data: earliest, error: earliestError } = await supabase
-                    .from('broker_holding')
-                    .select('date')
-                    .order('date', { ascending: true })
-                    .limit(1)
-                    .eq('symbol', symbol || '')
-                    .eq('broker_id', broker_id || 0);
-                if (earliestError) throw new Error(`Failed to get earliest date: ${earliestError.message}`);
-                if (!earliest || earliest.length === 0) throw new Error('No data found');
-                startDate = earliest[0].date;
+            const { data: results, error: queryError } = await distinctQuery;
+            if (queryError) throw new Error(`Failed to fetch dates: ${queryError.message}`);
+
+            const uniqueDates = [...new Set(results.map(r => r.date))];
+            if (uniqueDates.length === 0) {
+                throw new Error('No data found for the given filters');
+            } else if (uniqueDates.length < 7) {
+                // If fewer than 7 trading days, use the earliest available date
+                startDate = uniqueDates[uniqueDates.length - 1];
             } else {
-                startDate = seventh[0].date;
+                // 7th distinct trading date (index 6)
+                startDate = uniqueDates[6];
             }
             break;
         }
