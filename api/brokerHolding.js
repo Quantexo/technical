@@ -239,10 +239,50 @@ export default async function handler(req, res) {
         // ── Summary over all rows (before type filter) ───────────────────────
         const summary = computeSummary(allRows);
 
-        // ── Apply type filter ────────────────────────────────────────────────
-        let dataRows = allRows;
-        if (typeFilter === 'buy')  dataRows = allRows.filter(r => Number(r.holding_qty || 0) > 0);
-        if (typeFilter === 'sell') dataRows = allRows.filter(r => Number(r.holding_qty || 0) < 0);
+        // ── Group and Sum if search filters are applied ──────────────────────
+        let processedRows = allRows;
+        if (broker_id && !symbol) {
+            // Group by symbol
+            const groups = {};
+            for (const row of allRows) {
+                const sym = row.symbol;
+                if (!groups[sym]) {
+                    groups[sym] = {
+                        date: '—',
+                        symbol: sym,
+                        broker_id: broker_id,
+                        holding_qty: 0,
+                        holding_amount: 0
+                    };
+                }
+                groups[sym].holding_qty += Number(row.holding_qty || 0);
+                groups[sym].holding_amount += Number(row.holding_amount || 0);
+            }
+            processedRows = Object.values(groups);
+        } else if (symbol && !broker_id) {
+            // Group by broker_id
+            const groups = {};
+            for (const row of allRows) {
+                const bId = row.broker_id;
+                if (!groups[bId]) {
+                    groups[bId] = {
+                        date: '—',
+                        symbol: symbol,
+                        broker_id: bId,
+                        holding_qty: 0,
+                        holding_amount: 0
+                    };
+                }
+                groups[bId].holding_qty += Number(row.holding_qty || 0);
+                groups[bId].holding_amount += Number(row.holding_amount || 0);
+            }
+            processedRows = Object.values(groups);
+        }
+
+        // ── Apply type filter on processed rows ──────────────────────────────
+        let dataRows = processedRows;
+        if (typeFilter === 'buy')  dataRows = processedRows.filter(r => Number(r.holding_qty || 0) > 0);
+        if (typeFilter === 'sell') dataRows = processedRows.filter(r => Number(r.holding_qty || 0) < 0);
 
         // ── Map to response shape ────────────────────────────────────────────
         const mappedRows = dataRows.map(row => ({
