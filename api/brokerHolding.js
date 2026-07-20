@@ -48,13 +48,16 @@ function computeSummary(rows) {
         }
     }
 
+    const cleanQty = Math.abs(totalHoldingQty) < 1e-5 ? 0 : Number(totalHoldingQty.toFixed(4));
+    const cleanAmount = Math.abs(totalHoldingAmount) < 1e-4 ? 0 : Number(totalHoldingAmount.toFixed(4));
+
     return {
         buyQuantity: 0,
         sellQuantity: 0,
-        holdingQuantity: totalHoldingQty,
+        holdingQuantity: cleanQty,
         buyAmount: 0,
         sellAmount: 0,
-        netAmount: totalHoldingAmount,
+        netAmount: cleanAmount,
         averageBuyPrice: 0,
         averageSellPrice: 0,
     };
@@ -261,36 +264,34 @@ export default async function handler(req, res) {
         const offset = (pageNum - 1) * safeLimit;
         const paginatedRows = mappedRows.slice(offset, offset + safeLimit);
 
-        // ── Extra Calculations for 1M / 3M periods ───────────────────────────
+        // ── Extra Calculations ───────────────────────────────────────────────
         let symbolSummary = null;
         let brokerSummary = null;
 
-        if (period === '1M' || period === '3M') {
-            if (broker_id && !symbol) {
-                // Group by symbol
-                const groups = {};
-                for (const row of allRows) {
-                    const sym = row.symbol;
-                    if (!groups[sym]) groups[sym] = [];
-                    groups[sym].push(row);
-                }
-                symbolSummary = Object.entries(groups).map(([sym, rows]) => ({
-                    symbol: sym,
-                    ...computeSummary(rows)
-                })).sort((a, b) => Math.abs(b.holdingQuantity) - Math.abs(a.holdingQuantity));
-            } else if (symbol && !broker_id) {
-                // Group by broker_id
-                const groups = {};
-                for (const row of allRows) {
-                    const bId = row.broker_id;
-                    if (!groups[bId]) groups[bId] = [];
-                    groups[bId].push(row);
-                }
-                brokerSummary = Object.entries(groups).map(([bId, rows]) => ({
-                    broker_id: Number(bId),
-                    ...computeSummary(rows)
-                })).sort((a, b) => Math.abs(b.holdingQuantity) - Math.abs(a.holdingQuantity));
+        if (broker_id && !symbol) {
+            // Group by symbol
+            const groups = {};
+            for (const row of allRows) {
+                const sym = row.symbol;
+                if (!groups[sym]) groups[sym] = [];
+                groups[sym].push(row);
             }
+            symbolSummary = Object.entries(groups).map(([sym, rows]) => ({
+                symbol: sym,
+                ...computeSummary(rows)
+            })).sort((a, b) => Math.abs(b.holdingQuantity) - Math.abs(a.holdingQuantity));
+        } else if (symbol && !broker_id) {
+            // Group by broker_id
+            const groups = {};
+            for (const row of allRows) {
+                const bId = row.broker_id;
+                if (!groups[bId]) groups[bId] = [];
+                groups[bId].push(row);
+            }
+            brokerSummary = Object.entries(groups).map(([bId, rows]) => ({
+                broker_id: Number(bId),
+                ...computeSummary(rows)
+            })).sort((a, b) => Math.abs(b.holdingQuantity) - Math.abs(a.holdingQuantity));
         }
 
         const response = {
