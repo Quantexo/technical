@@ -9,7 +9,7 @@ if (!supabaseUrl || !supabaseKey) {
 }
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ─── Date helpers (merged from utils/dateHelpers.js) ──────────────────────────
+// ─── Date helpers ────────────────────────────────────────────────────────────
 /**
  * Add or subtract days from a date.
  * @param {Date} date - The starting date.
@@ -33,39 +33,35 @@ function formatDate(date) {
 // ─── Calculations (merged from utils/calculations.js) ─────────────────────────
 /**
  * Compute summary statistics from an array of transaction rows.
- * @param {Array} rows - Array of objects with type, totalQuantity, totalAmount.
+ * @param {Array} rows - Array of objects with buy_qty, buy_amount, sell_qty, sell_amount.
  * @returns {Object} Summary with buy/sell quantities, amounts, averages, and holding.
  */
 function computeSummary(rows) {
-    let buyQuantity = 0, sellQuantity = 0;
-    let buyAmount = 0, sellAmount = 0;
+    let totalBuyQty = 0, totalSellQty = 0;
+    let totalBuyAmount = 0, totalSellAmount = 0;
 
     for (const row of rows) {
-        const qty = Number(row.totalQuantity);
-        const amt = Number(row.totalAmount);
-        if (row.type === 'Buyer') {
-            buyQuantity += qty;
-            buyAmount += amt;
-        } else if (row.type === 'Seller') {
-            sellQuantity += qty;
-            sellAmount += amt;
-        }
+        totalBuyQty += Number(row.buy_qty);
+        totalSellQty += Number(row.sell_qty);
+        totalBuyAmount += Number(row.buy_amount);
+        totalSellAmount += Number(row.sell_amount);
     }
 
-    const holdingQuantity = buyQuantity - sellQuantity;
-    const netAmount = buyAmount - sellAmount;
-    const averageBuyPrice  = buyQuantity  > 0 ? buyAmount  / buyQuantity  : 0;
-    const averageSellPrice = sellQuantity > 0 ? sellAmount / sellQuantity : 0;
+    const holdingQty = totalBuyQty - totalSellQty;
+    const netAmount = totalBuyAmount - totalSellAmount;
+
+    const avgBuyPrice = totalBuyQty > 0 ? totalBuyAmount / totalBuyQty : 0;
+    const avgSellPrice = totalSellQty > 0 ? totalSellAmount / totalSellQty : 0;
 
     return {
-        buyQuantity,
-        sellQuantity,
-        holdingQuantity,
-        buyAmount,
-        sellAmount,
-        netAmount,
-        averageBuyPrice,
-        averageSellPrice,
+        buyQuantity: totalBuyQty,
+        sellQuantity: totalSellQty,
+        holdingQuantity: holdingQty,
+        buyAmount: totalBuyAmount,
+        sellAmount: totalSellAmount,
+        netAmount: netAmount,
+        averageBuyPrice: avgBuyPrice,
+        averageSellPrice: avgSellPrice,
     };
 }
 
@@ -74,7 +70,7 @@ function computeSummary(rows) {
  * Build the date range (startDate, endDate) based on request parameters.
  * For '1D' / '1W' uses actual trading days; other periods use calendar days.
  */
-async function buildDateRange({ date: specificDate, period, symbol, memberId }) {
+async function buildDateRange({ date: specificDate, period, symbol, broker_id }) {
     if (specificDate) {
         return { startDate: specificDate, endDate: specificDate };
     }
@@ -83,17 +79,16 @@ async function buildDateRange({ date: specificDate, period, symbol, memberId }) 
         throw new Error('Either date or period must be provided');
     }
 
-    // Get the latest date from the database, with optional filters.
-    let maxQuery = supabase
+    let query = supabase
         .from('broker_holding')
         .select('date')
         .order('date', { ascending: false })
         .limit(1);
 
-    if (symbol)   maxQuery = maxQuery.eq('symbol', symbol);
-    if (memberId) maxQuery = maxQuery.eq('memberId', memberId);
+    if (symbol) query = query.eq('symbol', symbol);
+    if (broker_id) query = query.eq('broker_id', broker_id);
 
-    const { data: maxDateResult, error: maxError } = await maxQuery;
+    const { data: maxDateResult, error: maxError } = await query;
     if (maxError) throw new Error(`Failed to fetch max date: ${maxError.message}`);
     if (!maxDateResult || maxDateResult.length === 0) {
         throw new Error('No data found for the given filters');
@@ -107,61 +102,47 @@ async function buildDateRange({ date: specificDate, period, symbol, memberId }) 
         case '1D':
             startDate = endDate;
             break;
-
         case '1W': {
-            // 7th latest distinct trading date (0-indexed offset = 6).
-            let weekQuery = supabase
+            let distinctQuery = supabase
                 .from('broker_holding')
                 .select('date')
                 .order('date', { ascending: false })
                 .limit(1)
                 .range(6, 6);
-
-            if (symbol)   weekQuery = weekQuery.eq('symbol', symbol);
-            if (memberId) weekQuery = weekQuery.eq('memberId', memberId);
-
-            const { data: seventhDateResult, error: seventhError } = await weekQuery;
+            if (symbol) distinctQuery = distinctQuery.eq('symbol', symbol);
+            if (broker_id) distinctQuery = distinctQuery.eq('broker_id', broker_id);
+            const { data: seventh, error: seventhError } = await distinctQuery;
             if (seventhError) throw new Error(`Failed to get 7th trading day: ${seventhError.message}`);
-
-            if (!seventhDateResult || seventhDateResult.length === 0) {
-                // Fewer than 7 trading days — fall back to earliest available.
-                let earliestQuery = supabase
+            if (!seventh || seventh.length === 0) {
+                const { data: earliest, error: earliestError } = await supabase
                     .from('broker_holding')
                     .select('date')
                     .order('date', { ascending: true })
-                    .limit(1);
-                if (symbol)   earliestQuery = earliestQuery.eq('symbol', symbol);
-                if (memberId) earliestQuery = earliestQuery.eq('memberId', memberId);
-
-                const { data: earliest, error: earliestError } = await earliestQuery;
+                    .limit(1)
+                    .eq('symbol', symbol || '')
+                    .eq('broker_id', broker_id || 0);
                 if (earliestError) throw new Error(`Failed to get earliest date: ${earliestError.message}`);
                 if (!earliest || earliest.length === 0) throw new Error('No data found');
                 startDate = earliest[0].date;
             } else {
-                startDate = seventhDateResult[0].date;
+                startDate = seventh[0].date;
             }
             break;
         }
-
-        case '1M':  startDate = formatDate(addDays(maxDate,  -30));  break;
-        case '3M':  startDate = formatDate(addDays(maxDate,  -90));  break;
-        case '1Y':  startDate = formatDate(addDays(maxDate, -365));  break;
-        case '2Y':  startDate = formatDate(addDays(maxDate, -730));  break;
-        default:
-            throw new Error(`Invalid period: "${period}". Valid values: 1D, 1W, 1M, 3M, 1Y, 2Y`);
+        case '1M': startDate = formatDate(addDays(maxDate, -30)); break;
+        case '3M': startDate = formatDate(addDays(maxDate, -90)); break;
+        case '1Y': startDate = formatDate(addDays(maxDate, -365)); break;
+        case '2Y': startDate = formatDate(addDays(maxDate, -730)); break;
+        default: throw new Error(`Invalid period: ${period}`);
     }
 
     return { startDate, endDate };
 }
 
-/**
- * Build the Supabase filter object for the main data fetch.
- * Note: type is filtered in JavaScript after the query, not in SQL.
- */
-function buildFilters({ symbol, memberId }) {
+function buildFilters({ symbol, broker_id }) {
     const filters = {};
-    if (symbol)   filters.symbol   = symbol;
-    if (memberId) filters.memberId = memberId;
+    if (symbol) filters.symbol = symbol;
+    if (broker_id) filters.broker_id = broker_id;
     return filters;
 }
 
@@ -175,10 +156,8 @@ module.exports = async (req, res) => {
     }
 
     try {
-        // 1. Parse query parameters.
         const { date, period, symbol, memberId, type } = req.query;
 
-        // Validate period / date mutual exclusivity.
         if (!date && !period) {
             return res.status(400).json({ error: 'Either date or period must be provided' });
         }
@@ -186,38 +165,38 @@ module.exports = async (req, res) => {
             return res.status(400).json({ error: 'Provide either date or period, not both' });
         }
 
-        // Validate type: frontend sends 'Buy' or 'Sell'.
+        // Type mapping: 'Buy' -> filter rows with buy_qty > 0, 'Sell' -> sell_qty > 0
         let typeFilter = null;
         if (type) {
-            if      (type === 'Buy')  typeFilter = 'Buyer';
-            else if (type === 'Sell') typeFilter = 'Seller';
-            else return res.status(400).json({ error: 'type must be "Buy" or "Sell"' });
+            if (type === 'Buy') typeFilter = 'buy';
+            else if (type === 'Sell') typeFilter = 'sell';
+            else {
+                return res.status(400).json({ error: 'Type must be "Buy" or "Sell"' });
+            }
         }
 
-        // Convert memberId to integer.
-        let memberIdInt = null;
+        let broker_id = null;
         if (memberId) {
-            memberIdInt = parseInt(memberId, 10);
-            if (isNaN(memberIdInt)) {
+            broker_id = parseInt(memberId, 10);
+            if (isNaN(broker_id)) {
                 return res.status(400).json({ error: 'memberId must be a valid integer' });
             }
         }
 
-        // 2. Determine date range.
-        const { startDate, endDate } = await buildDateRange({
-            date, period, symbol, memberId: memberIdInt
-        });
+        // Get date range
+        const dateRange = await buildDateRange({ date, period, symbol, broker_id });
+        const { startDate, endDate } = dateRange;
 
-        // 3. Build and execute the main query.
-        const filters = buildFilters({ symbol, memberId: memberIdInt });
+        // Build filters
+        const filters = buildFilters({ symbol, broker_id });
         let query = supabase
             .from('broker_holding')
-            .select('date, symbol, memberId, type, totalQuantity, totalAmount, averagePrice')
+            .select('date, symbol, broker_id, buy_qty, buy_amount, sell_qty, sell_amount')
             .gte('date', startDate)
             .lte('date', endDate);
 
-        if (filters.symbol)   query = query.eq('symbol',   filters.symbol);
-        if (filters.memberId) query = query.eq('memberId', filters.memberId);
+        if (filters.symbol) query = query.eq('symbol', filters.symbol);
+        if (filters.broker_id) query = query.eq('broker_id', filters.broker_id);
 
         const { data: rows, error: queryError } = await query;
         if (queryError) {
@@ -225,33 +204,39 @@ module.exports = async (req, res) => {
             return res.status(500).json({ error: 'Database query failed' });
         }
 
-        // 4. Compute summary from all rows (before optional type filter).
+        // Compute summary from all rows
         const summary = computeSummary(rows);
 
-        // 5. Apply optional type filter to response rows.
-        const dataRows = typeFilter ? rows.filter(r => r.type === typeFilter) : rows;
+        // Filter data rows if type is provided
+        let dataRows = rows;
+        if (typeFilter === 'buy') {
+            dataRows = rows.filter(row => Number(row.buy_qty) > 0);
+        } else if (typeFilter === 'sell') {
+            dataRows = rows.filter(row => Number(row.sell_qty) > 0);
+        }
 
-        // 6. Build response.
         const response = {
             success: true,
             filters: {
-                ...(date       && { date }),
-                ...(period     && { period }),
-                ...(symbol     && { symbol }),
-                ...(memberIdInt !== null && { memberId: memberIdInt }),
-                ...(type       && { type }),
+                ...(date && { date }),
+                ...(period && { period }),
+                ...(symbol && { symbol }),
+                ...(broker_id !== null && { memberId: broker_id }),
+                ...(type && { type }),
                 startDate,
                 endDate,
             },
             summary,
             data: dataRows.map(row => ({
-                date:          row.date,
-                symbol:        row.symbol,
-                memberId:      row.memberId,
-                type:          row.type,
-                totalQuantity: Number(row.totalQuantity),
-                totalAmount:   Number(row.totalAmount),
-                averagePrice:  Number(row.averagePrice),
+                date: row.date,
+                symbol: row.symbol,
+                broker_id: row.broker_id,
+                buy_qty: Number(row.buy_qty),
+                buy_amount: Number(row.buy_amount),
+                sell_qty: Number(row.sell_qty),
+                sell_amount: Number(row.sell_amount),
+                holding_qty: Number(row.buy_qty) - Number(row.sell_qty),
+                holding_amount: Number(row.buy_amount) - Number(row.sell_amount),
             })),
         };
 
