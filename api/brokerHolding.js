@@ -10,19 +10,12 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ─── Date helpers ────────────────────────────────────────────────────────────
-/**
- * Add or subtract days from a date.
- * @param {Date} date - The starting date.
- * @param {number} days - Number of days to add (positive) or subtract (negative).
- * @returns {Date} New date.
- */
 function addDays(date, days) {
     const result = new Date(date);
     result.setDate(result.getDate() + days);
     return result;
 }
 
-/** Format a Date object to YYYY-MM-DD. */
 function formatDate(date) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -30,12 +23,7 @@ function formatDate(date) {
     return `${year}-${month}-${day}`;
 }
 
-// ─── Calculations (merged from utils/calculations.js) ─────────────────────────
-/**
- * Compute summary statistics from an array of transaction rows.
- * @param {Array} rows - Array of objects with buy_qty, buy_amount, sell_qty, sell_amount.
- * @returns {Object} Summary with buy/sell quantities, amounts, averages, and holding.
- */
+// ─── Calculations ─────────────────────────────────────────────────────────────
 function computeSummary(rows) {
     let totalBuyQty = 0, totalSellQty = 0;
     let totalBuyAmount = 0, totalSellAmount = 0;
@@ -49,7 +37,6 @@ function computeSummary(rows) {
 
     const holdingQty = totalBuyQty - totalSellQty;
     const netAmount = totalBuyAmount - totalSellAmount;
-
     const avgBuyPrice = totalBuyQty > 0 ? totalBuyAmount / totalBuyQty : 0;
     const avgSellPrice = totalSellQty > 0 ? totalSellAmount / totalSellQty : 0;
 
@@ -59,17 +46,74 @@ function computeSummary(rows) {
         holdingQuantity: holdingQty,
         buyAmount: totalBuyAmount,
         sellAmount: totalSellAmount,
-        netAmount: netAmount,
+        netAmount,
         averageBuyPrice: avgBuyPrice,
         averageSellPrice: avgSellPrice,
     };
 }
 
-// ─── Query builder (merged from utils/queryBuilder.js) ────────────────────────
-/**
- * Build the date range (startDate, endDate) based on request parameters.
- * For '1D' / '1W' uses actual trading days; other periods use calendar days.
- */
+// ─── Fetch ALL rows with automatic pagination (Supabase caps at 1000/req) ─────
+async function fetchAllRows(baseQuery, selectStr, filters, dateFilter) {
+    const PAGE_SIZE = 1000;
+    let allRows = [];
+    let from = 0;
+
+    while (true) {
+        let q = supabase
+            .from('broker_holding')
+            .select(selectStr)
+            .gte('date', dateFilter.startDate)
+            .lte('date', dateFilter.endDate)
+            .order('date', { ascending: false })
+            .range(from, from + PAGE_SIZE - 1);
+
+        if (filters.symbol) q = q.eq('symbol', filters.symbol);
+        if (filters.broker_id) q = q.eq('broker_id', filters.broker_id);
+
+        const { data, error } = await q;
+        if (error) throw new Error(`Database query failed: ${error.message}`);
+        if (!data || data.length === 0) break;
+
+        allRows = allRows.concat(data);
+        if (data.length < PAGE_SIZE) break;  // Last page reached
+        from += PAGE_SIZE;
+    }
+
+    return allRows;
+}
+
+// ─── Get distinct trading dates from the table ─────────────────────────────
+async function getDistinctTradingDates({ symbol, broker_id } = {}) {
+    // Fetch the most recent 60 calendar days worth of distinct date values.
+    // We do small pages and deduplicate on the JS side.
+    const PAGE_SIZE = 1000;
+    let allDates = new Set();
+    let from = 0;
+
+    while (allDates.size < 30) {  // We need at most 30 unique dates
+        let q = supabase
+            .from('broker_holding')
+            .select('date')
+            .order('date', { ascending: false })
+            .range(from, from + PAGE_SIZE - 1);
+
+        if (symbol) q = q.eq('symbol', symbol);
+        if (broker_id) q = q.eq('broker_id', broker_id);
+
+        const { data, error } = await q;
+        if (error) throw new Error(`Failed to fetch dates: ${error.message}`);
+        if (!data || data.length === 0) break;
+
+        data.forEach(r => allDates.add(r.date));
+        if (data.length < PAGE_SIZE) break;
+        from += PAGE_SIZE;
+    }
+
+    // Return sorted descending (most recent first)
+    return [...allDates].sort((a, b) => (a > b ? -1 : 1));
+}
+
+// ─── Build the date range based on period / specific date ─────────────────
 async function buildDateRange({ date: specificDate, period, symbol, broker_id }) {
     if (specificDate) {
         return { startDate: specificDate, endDate: specificDate };
@@ -79,22 +123,23 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
         throw new Error('Either date or period must be provided');
     }
 
-    let query = supabase
+    // First, find the latest available date
+    let maxQuery = supabase
         .from('broker_holding')
         .select('date')
         .order('date', { ascending: false })
         .limit(1);
 
-    if (symbol) query = query.eq('symbol', symbol);
-    if (broker_id) query = query.eq('broker_id', broker_id);
+    if (symbol) maxQuery = maxQuery.eq('symbol', symbol);
+    if (broker_id) maxQuery = maxQuery.eq('broker_id', broker_id);
 
-    const { data: maxDateResult, error: maxError } = await query;
+    const { data: maxResult, error: maxError } = await maxQuery;
     if (maxError) throw new Error(`Failed to fetch max date: ${maxError.message}`);
-    if (!maxDateResult || maxDateResult.length === 0) {
+    if (!maxResult || maxResult.length === 0) {
         throw new Error('No data found for the given filters');
     }
 
-    const maxDate = new Date(maxDateResult[0].date + 'T00:00:00Z');
+    const maxDate = new Date(maxResult[0].date + 'T00:00:00Z');
     const endDate = formatDate(maxDate);
     let startDate;
 
@@ -102,44 +147,26 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
         case '1D':
             startDate = endDate;
             break;
-        case '1W': {
-            let distinctQuery = supabase
-                .from('broker_holding')
-                .select('date')
-                .order('date', { ascending: false })
-                .limit(4000);
-            if (symbol) distinctQuery = distinctQuery.eq('symbol', symbol);
-            if (broker_id) distinctQuery = distinctQuery.eq('broker_id', broker_id);
-            const { data: results, error: queryError } = await distinctQuery;
-            if (queryError) throw new Error(`Failed to fetch dates: ${queryError.message}`);
 
-            const uniqueDates = [...new Set(results.map(r => r.date))];
+        case '1W': {
+            // Fetch distinct trading dates to find exactly 7 trading days
+            const uniqueDates = await getDistinctTradingDates({ symbol, broker_id });
             if (uniqueDates.length === 0) {
                 throw new Error('No data found for the given filters');
-            } else if (uniqueDates.length < 7) {
-                // If fewer than 7 trading days, use the earliest available date
-                startDate = uniqueDates[uniqueDates.length - 1];
-            } else {
-                // 7th distinct trading date (index 6)
-                startDate = uniqueDates[6];
             }
+            // Use 7th trading day or earliest available
+            startDate = uniqueDates.length >= 7 ? uniqueDates[6] : uniqueDates[uniqueDates.length - 1];
             break;
         }
-        case '1M': startDate = formatDate(addDays(maxDate, -30)); break;
-        case '3M': startDate = formatDate(addDays(maxDate, -90)); break;
-        case '1Y': startDate = formatDate(addDays(maxDate, -365)); break;
-        case '2Y': startDate = formatDate(addDays(maxDate, -730)); break;
-        default: throw new Error(`Invalid period: ${period}`);
+
+        case '1M':  startDate = formatDate(addDays(maxDate, -30));  break;
+        case '3M':  startDate = formatDate(addDays(maxDate, -90));  break;
+        case '1Y':  startDate = formatDate(addDays(maxDate, -365)); break;
+        case '2Y':  startDate = formatDate(addDays(maxDate, -730)); break;
+        default:    throw new Error(`Invalid period: ${period}`);
     }
 
     return { startDate, endDate };
-}
-
-function buildFilters({ symbol, broker_id }) {
-    const filters = {};
-    if (symbol) filters.symbol = symbol;
-    if (broker_id) filters.broker_id = broker_id;
-    return filters;
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -152,7 +179,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { date, period, symbol, memberId, type } = req.query;
+        const { date, period, symbol, memberId, type, page, limit } = req.query;
 
         if (!date && !period) {
             return res.status(400).json({ error: 'Either date or period must be provided' });
@@ -161,14 +188,11 @@ export default async function handler(req, res) {
             return res.status(400).json({ error: 'Provide either date or period, not both' });
         }
 
-        // Type mapping: 'Buy' -> filter rows with buy_qty > 0, 'Sell' -> sell_qty > 0
         let typeFilter = null;
         if (type) {
             if (type === 'Buy') typeFilter = 'buy';
             else if (type === 'Sell') typeFilter = 'sell';
-            else {
-                return res.status(400).json({ error: 'Type must be "Buy" or "Sell"' });
-            }
+            else return res.status(400).json({ error: 'Type must be "Buy" or "Sell"' });
         }
 
         let broker_id = null;
@@ -179,64 +203,68 @@ export default async function handler(req, res) {
             }
         }
 
-        // Get date range
-        const dateRange = await buildDateRange({ date, period, symbol, broker_id });
-        const { startDate, endDate } = dateRange;
+        // ── Date range ──────────────────────────────────────────────────────
+        const { startDate, endDate } = await buildDateRange({ date, period, symbol, broker_id });
+        const filters = { symbol: symbol || null, broker_id };
 
-        // Build filters
-        const filters = buildFilters({ symbol, broker_id });
-        let query = supabase
-            .from('broker_holding')
-            .select('date, symbol, broker_id, buy_qty, buy_amount, sell_qty, sell_amount')
-            .gte('date', startDate)
-            .lte('date', endDate);
+        // ── Fetch ALL rows (auto-paginate) ───────────────────────────────────
+        const allRows = await fetchAllRows(
+            null,
+            'date, symbol, broker_id, buy_qty, buy_amount, sell_qty, sell_amount',
+            filters,
+            { startDate, endDate }
+        );
 
-        if (filters.symbol) query = query.eq('symbol', filters.symbol);
-        if (filters.broker_id) query = query.eq('broker_id', filters.broker_id);
+        // ── Summary over all rows (before type filter) ───────────────────────
+        const summary = computeSummary(allRows);
 
-        const { data: rows, error: queryError } = await query;
-        if (queryError) {
-            console.error('Supabase query error:', queryError);
-            return res.status(500).json({ error: 'Database query failed' });
-        }
+        // ── Apply type filter ────────────────────────────────────────────────
+        let dataRows = allRows;
+        if (typeFilter === 'buy')  dataRows = allRows.filter(r => Number(r.buy_qty) > 0);
+        if (typeFilter === 'sell') dataRows = allRows.filter(r => Number(r.sell_qty) > 0);
 
-        // Compute summary from all rows
-        const summary = computeSummary(rows);
+        // ── Map to response shape ────────────────────────────────────────────
+        const mappedRows = dataRows.map(row => ({
+            date:           row.date,
+            symbol:         row.symbol,
+            broker_id:      row.broker_id,
+            buy_qty:        Number(row.buy_qty),
+            buy_amount:     Number(row.buy_amount),
+            sell_qty:       Number(row.sell_qty),
+            sell_amount:    Number(row.sell_amount),
+            holding_qty:    Number(row.buy_qty) - Number(row.sell_qty),
+            holding_amount: Number(row.buy_amount) - Number(row.sell_amount),
+        }));
 
-        // Filter data rows if type is provided
-        let dataRows = rows;
-        if (typeFilter === 'buy') {
-            dataRows = rows.filter(row => Number(row.buy_qty) > 0);
-        } else if (typeFilter === 'sell') {
-            dataRows = rows.filter(row => Number(row.sell_qty) > 0);
-        }
+        // ── Optional client-side pagination via ?page=&limit= ────────────────
+        const pageNum  = parseInt(page  || '1',    10);
+        const limitNum = parseInt(limit || '1000', 10);
+        const safeLimit = Math.min(Math.max(limitNum, 1), 1000);
+        const offset = (pageNum - 1) * safeLimit;
+        const paginatedRows = mappedRows.slice(offset, offset + safeLimit);
 
         const response = {
             success: true,
             filters: {
-                ...(date && { date }),
-                ...(period && { period }),
-                ...(symbol && { symbol }),
+                ...(date     && { date }),
+                ...(period   && { period }),
+                ...(symbol   && { symbol }),
                 ...(broker_id !== null && { memberId: broker_id }),
-                ...(type && { type }),
+                ...(type     && { type }),
                 startDate,
                 endDate,
             },
             summary,
-            data: dataRows.map(row => ({
-                date: row.date,
-                symbol: row.symbol,
-                broker_id: row.broker_id,
-                buy_qty: Number(row.buy_qty),
-                buy_amount: Number(row.buy_amount),
-                sell_qty: Number(row.sell_qty),
-                sell_amount: Number(row.sell_amount),
-                holding_qty: Number(row.buy_qty) - Number(row.sell_qty),
-                holding_amount: Number(row.buy_amount) - Number(row.sell_amount),
-            })),
+            pagination: {
+                total:      mappedRows.length,
+                page:       pageNum,
+                limit:      safeLimit,
+                totalPages: Math.ceil(mappedRows.length / safeLimit),
+            },
+            data: paginatedRows,
         };
 
-        if (rows.length === 0) {
+        if (allRows.length === 0) {
             response.message = 'No records found for the given filters';
         }
 
