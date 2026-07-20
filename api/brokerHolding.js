@@ -1,13 +1,19 @@
 // api/brokerHolding.js — self-contained (lib + utils merged in)
 import { createClient } from '@supabase/supabase-js';
 
-// ─── Supabase client (separate DB — uses SUPABASE_URL_2 / SUPABASE_ANON_KEY_2) ─
+// ─── Supabase client — Broker Holdings DB (SUPABASE_URL_2 / SUPABASE_ANON_KEY_2) ─
 const supabaseUrl = process.env.SUPABASE_URL_2;
 const supabaseKey = process.env.SUPABASE_ANON_KEY_2;
 if (!supabaseUrl || !supabaseKey) {
     throw new Error('Missing SUPABASE_URL_2 or SUPABASE_ANON_KEY_2 environment variables');
 }
 const supabase = createClient(supabaseUrl, supabaseKey);
+
+// ─── Supabase client — Main DB (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) ──────
+const supabaseMain = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 // ─── Date helpers ────────────────────────────────────────────────────────────
 function addDays(date, days) {
@@ -179,7 +185,17 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { date, period, symbol, memberId, type, page, limit } = req.query;
+        const { date, period, symbol, memberId, type, page, limit, route } = req.query;
+
+        // ── Broker list sub-route ─────────────────────────────────────────────
+        if (route === 'brokers') {
+            const { data, error } = await supabaseMain
+                .from('brokers')
+                .select('broker_id, broker_name')
+                .order('broker_id', { ascending: true });
+            if (error) return res.status(500).json({ success: false, error: error.message });
+            return res.status(200).json({ success: true, count: data.length, brokers: data });
+        }
 
         if (!date && !period) {
             return res.status(400).json({ error: 'Either date or period must be provided' });
