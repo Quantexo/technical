@@ -1,5 +1,5 @@
 // api/brokerHolding.js — self-contained (lib + utils merged in)
-const { createClient } = require('@supabase/supabase-js');
+import { createClient } from '@supabase/supabase-js';
 
 // ─── Supabase client (separate DB — uses SUPABASE_URL_2 / SUPABASE_ANON_KEY_2) ─
 const supabaseUrl = process.env.SUPABASE_URL_2;
@@ -147,7 +147,7 @@ function buildFilters({ symbol, broker_id }) {
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     if (req.method === 'OPTIONS') return res.status(200).end();
@@ -250,4 +250,4 @@ module.exports = async (req, res) => {
         const statusCode = error.message.includes('No data found') ? 404 : 400;
         return res.status(statusCode).json({ error: error.message });
     }
-};
+}
