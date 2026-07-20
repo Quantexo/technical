@@ -31,30 +31,32 @@ function formatDate(date) {
 
 // ─── Calculations ─────────────────────────────────────────────────────────────
 function computeSummary(rows) {
-    let totalBuyQty = 0, totalSellQty = 0;
-    let totalBuyAmount = 0, totalSellAmount = 0;
+    let totalHoldingQty = 0;
+    let totalHoldingAmount = 0;
 
     for (const row of rows) {
-        totalBuyQty += Number(row.buy_qty);
-        totalSellQty += Number(row.sell_qty);
-        totalBuyAmount += Number(row.buy_amount);
-        totalSellAmount += Number(row.sell_amount);
+        if (row.holding_qty !== undefined) {
+            totalHoldingQty += Number(row.holding_qty || 0);
+        } else {
+            totalHoldingQty += Number(row.buy_qty || 0) - Number(row.sell_qty || 0);
+        }
+
+        if (row.holding_amount !== undefined) {
+            totalHoldingAmount += Number(row.holding_amount || 0);
+        } else {
+            totalHoldingAmount += Number(row.buy_amount || 0) - Number(row.sell_amount || 0);
+        }
     }
 
-    const holdingQty = totalBuyQty - totalSellQty;
-    const netAmount = totalBuyAmount - totalSellAmount;
-    const avgBuyPrice = totalBuyQty > 0 ? totalBuyAmount / totalBuyQty : 0;
-    const avgSellPrice = totalSellQty > 0 ? totalSellAmount / totalSellQty : 0;
-
     return {
-        buyQuantity: totalBuyQty,
-        sellQuantity: totalSellQty,
-        holdingQuantity: holdingQty,
-        buyAmount: totalBuyAmount,
-        sellAmount: totalSellAmount,
-        netAmount,
-        averageBuyPrice: avgBuyPrice,
-        averageSellPrice: avgSellPrice,
+        buyQuantity: 0,
+        sellQuantity: 0,
+        holdingQuantity: totalHoldingQty,
+        buyAmount: 0,
+        sellAmount: 0,
+        netAmount: totalHoldingAmount,
+        averageBuyPrice: 0,
+        averageSellPrice: 0,
     };
 }
 
@@ -226,7 +228,7 @@ export default async function handler(req, res) {
         // ── Fetch ALL rows (auto-paginate) ───────────────────────────────────
         const allRows = await fetchAllRows(
             null,
-            'date, symbol, broker_id, buy_qty, buy_amount, sell_qty, sell_amount',
+            'date, symbol, broker_id, holding_qty, holding_amount',
             filters,
             { startDate, endDate }
         );
@@ -236,20 +238,20 @@ export default async function handler(req, res) {
 
         // ── Apply type filter ────────────────────────────────────────────────
         let dataRows = allRows;
-        if (typeFilter === 'buy')  dataRows = allRows.filter(r => Number(r.buy_qty) > 0);
-        if (typeFilter === 'sell') dataRows = allRows.filter(r => Number(r.sell_qty) > 0);
+        if (typeFilter === 'buy')  dataRows = allRows.filter(r => Number(r.holding_qty || 0) > 0);
+        if (typeFilter === 'sell') dataRows = allRows.filter(r => Number(r.holding_qty || 0) < 0);
 
         // ── Map to response shape ────────────────────────────────────────────
         const mappedRows = dataRows.map(row => ({
             date:           row.date,
             symbol:         row.symbol,
             broker_id:      row.broker_id,
-            buy_qty:        Number(row.buy_qty),
-            buy_amount:     Number(row.buy_amount),
-            sell_qty:       Number(row.sell_qty),
-            sell_amount:    Number(row.sell_amount),
-            holding_qty:    Number(row.buy_qty) - Number(row.sell_qty),
-            holding_amount: Number(row.buy_amount) - Number(row.sell_amount),
+            buy_qty:        0,
+            buy_amount:     0,
+            sell_qty:       0,
+            sell_amount:    0,
+            holding_qty:    Number(row.holding_qty || 0),
+            holding_amount: Number(row.holding_amount || 0),
         }));
 
         // ── Optional client-side pagination via ?page=&limit= ────────────────
@@ -258,6 +260,38 @@ export default async function handler(req, res) {
         const safeLimit = Math.min(Math.max(limitNum, 1), 1000);
         const offset = (pageNum - 1) * safeLimit;
         const paginatedRows = mappedRows.slice(offset, offset + safeLimit);
+
+        // ── Extra Calculations for 1M / 3M periods ───────────────────────────
+        let symbolSummary = null;
+        let brokerSummary = null;
+
+        if (period === '1M' || period === '3M') {
+            if (broker_id && !symbol) {
+                // Group by symbol
+                const groups = {};
+                for (const row of allRows) {
+                    const sym = row.symbol;
+                    if (!groups[sym]) groups[sym] = [];
+                    groups[sym].push(row);
+                }
+                symbolSummary = Object.entries(groups).map(([sym, rows]) => ({
+                    symbol: sym,
+                    ...computeSummary(rows)
+                })).sort((a, b) => Math.abs(b.holdingQuantity) - Math.abs(a.holdingQuantity));
+            } else if (symbol && !broker_id) {
+                // Group by broker_id
+                const groups = {};
+                for (const row of allRows) {
+                    const bId = row.broker_id;
+                    if (!groups[bId]) groups[bId] = [];
+                    groups[bId].push(row);
+                }
+                brokerSummary = Object.entries(groups).map(([bId, rows]) => ({
+                    broker_id: Number(bId),
+                    ...computeSummary(rows)
+                })).sort((a, b) => Math.abs(b.holdingQuantity) - Math.abs(a.holdingQuantity));
+            }
+        }
 
         const response = {
             success: true,
@@ -271,6 +305,8 @@ export default async function handler(req, res) {
                 endDate,
             },
             summary,
+            ...(symbolSummary && { symbolSummary }),
+            ...(brokerSummary && { brokerSummary }),
             pagination: {
                 total:      mappedRows.length,
                 page:       pageNum,
