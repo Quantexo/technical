@@ -188,6 +188,7 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
         case '1M':  startDate = formatDate(addDays(maxDate, -30));  break;
         case '3M':  startDate = formatDate(addDays(maxDate, -90));  break;
         case '6M':  startDate = formatDate(addDays(maxDate, -180)); break;
+        case '9M':  startDate = formatDate(addDays(maxDate, -270)); break;
         default:    throw new Error(`Invalid period: ${period}`);
     }
 
@@ -377,7 +378,7 @@ export default async function handler(req, res) {
 
         // ── Client‑side pagination ───────────────────────────────────────────
         const pageNum  = parseInt(page  || '1',    10);
-        const limitNum = parseInt(limit || '1000', 10);
+        const limitNum = parseInt(limit || '150', 10); //CHANGE FOR LIMIT
         const safeLimit = Math.min(Math.max(limitNum, 1), 1000);
         const offset = (pageNum - 1) * safeLimit;
         const paginatedRows = mappedRows.slice(offset, offset + safeLimit);
