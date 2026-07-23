@@ -1,4 +1,4 @@
-// api/brokerHolding.js — self-contained (lib + utils merged in)
+// api/brokerHolding.js — self-contained (PostgreSQL RPC + PostgREST fallback)
 import { createClient } from '@supabase/supabase-js';
 
 // ─── Supabase client — Broker Holdings DB ─
@@ -29,117 +29,33 @@ function formatDate(date) {
     return `${year}-${month}-${day}`;
 }
 
-// ─── Calculations (route‑aware) ─────────────────────────────────────────────
-function computeSummary(rows, dataType) {
-    if (!rows || rows.length === 0) {
-        if (dataType === 'buy') return { totalBuyQty: 0, totalBuyAmount: 0, averageBuyPrice: 0 };
-        if (dataType === 'sell') return { totalSellQty: 0, totalSellAmount: 0, averageSellPrice: 0 };
-        // holding (default)
-        return {
-            buyQuantity: 0,
-            sellQuantity: 0,
-            holdingQuantity: 0,
-            buyAmount: 0,
-            sellAmount: 0,
-            netAmount: 0,
-            averageBuyPrice: 0,
-            averageSellPrice: 0,
-        };
-    }
-
-    if (dataType === 'buy') {
-        const totalBuyQty = rows.reduce((sum, r) => sum + Number(r.buy_qty || 0), 0);
-        const totalBuyAmount = rows.reduce((sum, r) => sum + Number(r.buy_amount || 0), 0);
-        const avgBuyPrice = totalBuyQty !== 0 ? totalBuyAmount / totalBuyQty : 0;
-        return {
-            totalBuyQty: Number(totalBuyQty.toFixed(4)),
-            totalBuyAmount: Number(totalBuyAmount.toFixed(4)),
-            averageBuyPrice: Number(avgBuyPrice.toFixed(4)),
-        };
-    }
-
-    if (dataType === 'sell') {
-        const totalSellQty = rows.reduce((sum, r) => sum + Number(r.sell_qty || 0), 0);
-        const totalSellAmount = rows.reduce((sum, r) => sum + Number(r.sell_amount || 0), 0);
-        const avgSellPrice = totalSellQty !== 0 ? totalSellAmount / totalSellQty : 0;
-        return {
-            totalSellQty: Number(totalSellQty.toFixed(4)),
-            totalSellAmount: Number(totalSellAmount.toFixed(4)),
-            averageSellPrice: Number(avgSellPrice.toFixed(4)),
-        };
-    }
-
-    // holding (default)
-    const totalHoldingQty = rows.reduce((sum, r) => sum + Number(r.holding_qty || 0), 0);
-    const totalHoldingAmount = rows.reduce((sum, r) => sum + Number(r.holding_amount || 0), 0);
-    return {
-        buyQuantity: 0,
-        sellQuantity: 0,
-        holdingQuantity: Math.abs(totalHoldingQty) < 1e-5 ? 0 : Number(totalHoldingQty.toFixed(4)),
-        buyAmount: 0,
-        sellAmount: 0,
-        netAmount: Math.abs(totalHoldingAmount) < 1e-4 ? 0 : Number(totalHoldingAmount.toFixed(4)),
-        averageBuyPrice: 0,
-        averageSellPrice: 0,
-    };
-}
-
-// ─── Fetch ALL rows with automatic pagination ───────────────────────────────
-async function fetchAllRows(selectStr, filters, dateFilter) {
-    const PAGE_SIZE = 1000;
-    let allRows = [];
-    let from = 0;
-
-    while (true) {
-        let q = supabase
-            .from('broker_holding')
-            .select(selectStr)
-            .gte('date', dateFilter.startDate)
-            .lte('date', dateFilter.endDate)
-            .order('date', { ascending: false })
-            .range(from, from + PAGE_SIZE - 1);
-
-        if (filters.symbol) q = q.eq('symbol', filters.symbol);
-        if (filters.broker_id) q = q.eq('broker_id', filters.broker_id);
-
-        const { data, error } = await q;
-        if (error) throw new Error(`Database query failed: ${error.message}`);
-        if (!data || data.length === 0) break;
-
-        allRows = allRows.concat(data);
-        if (data.length < PAGE_SIZE) break;
-        from += PAGE_SIZE;
-    }
-
-    return allRows;
-}
-
 // ─── Get distinct trading dates ─────────────────────────────────────────────
 async function getDistinctTradingDates({ symbol, broker_id } = {}) {
-    const PAGE_SIZE = 1000;
-    let allDates = new Set();
-    let from = 0;
+    try {
+        const { data, error } = await supabase.rpc('get_distinct_trading_dates', {
+            p_symbol: symbol || null,
+            p_broker_id: broker_id || null,
+            p_limit: 30
+        });
+        if (!error && data && data.length > 0) {
+            return data.map(r => (typeof r === 'string' ? r : r.date));
+        }
+    } catch (_) {}
 
-    while (allDates.size < 30) {
-        let q = supabase
-            .from('broker_holding')
-            .select('date')
-            .order('date', { ascending: false })
-            .range(from, from + PAGE_SIZE - 1);
+    // Fallback mode: query top 200 rows to extract distinct dates instantly
+    let q = supabase
+        .from('broker_holding')
+        .select('date')
+        .order('date', { ascending: false })
+        .limit(200);
 
-        if (symbol) q = q.eq('symbol', symbol);
-        if (broker_id) q = q.eq('broker_id', broker_id);
+    if (symbol) q = q.eq('symbol', symbol);
+    if (broker_id) q = q.eq('broker_id', broker_id);
 
-        const { data, error } = await q;
-        if (error) throw new Error(`Failed to fetch dates: ${error.message}`);
-        if (!data || data.length === 0) break;
-
-        data.forEach(r => allDates.add(r.date));
-        if (data.length < PAGE_SIZE) break;
-        from += PAGE_SIZE;
-    }
-
-    return [...allDates].sort((a, b) => (a > b ? -1 : 1));
+    const { data, error } = await q;
+    if (error) throw new Error(`Failed to fetch dates: ${error.message}`);
+    const dates = [...new Set(data?.map(r => r.date) || [])];
+    return dates.sort((a, b) => (a > b ? -1 : 1));
 }
 
 // ─── Build the date range ───────────────────────────────────────────────────
@@ -209,7 +125,7 @@ export default async function handler(req, res) {
             route, fields, sort_by, sort_order
         } = req.query;
 
-        // ── Broker list sub‑route ─────────────────────────────────────────────
+        // ── Broker list sub-route ─────────────────────────────────────────────
         if (route === 'brokers') {
             const { data, error } = await supabaseMain
                 .from('brokers')
@@ -223,7 +139,6 @@ export default async function handler(req, res) {
         let dataType = 'holding';    // default
         if (route === 'buy')  dataType = 'buy';
         if (route === 'sell') dataType = 'sell';
-        // Only allow known routes
         if (route && !['buy', 'sell', 'brokers'].includes(route)) {
             return res.status(400).json({ error: 'Invalid route. Use buy, sell, or holding (default)' });
         }
@@ -235,7 +150,6 @@ export default async function handler(req, res) {
             return res.status(400).json({ error: 'Provide either date or period, not both' });
         }
 
-        // type filter (Buy/Sell) only applies to the default holding route
         if (type && dataType !== 'holding') {
             return res.status(400).json({ error: 'The type filter can only be used with the holding route' });
         }
@@ -251,94 +165,78 @@ export default async function handler(req, res) {
             }
         }
 
-        // ── Date range ──────────────────────────────────────────────────────
+        // ── Date range calculation ─────────────────────────────────────────
         const { startDate, endDate } = await buildDateRange({ date, period, symbol, broker_id });
-        const filters = { symbol: symbol || null, broker_id };
 
-        // ── Choose select string based on dataType ───────────────────────────
-        let selectStr;
-        if (dataType === 'buy')       selectStr = 'date, symbol, broker_id, buy_qty, buy_amount';
-        else if (dataType === 'sell') selectStr = 'date, symbol, broker_id, sell_qty, sell_amount';
-        else                          selectStr = 'date, symbol, broker_id, holding_qty, holding_amount';
+        const pageNum  = parseInt(page  || '1',   10);
+        const limitNum = parseInt(limit || '500', 10);
+        const safeLimit = Math.min(Math.max(limitNum, 1), 1000);
+        const offset = (pageNum - 1) * safeLimit;
 
-        // ── Fetch ALL rows ───────────────────────────────────────────────────
-        const allRows = await fetchAllRows(selectStr, filters, { startDate, endDate });
+        // ── Try PostgreSQL RPC Function (Server-side 50ms aggregation) ──────
+        const { data: rpcData, error: rpcError } = await supabase.rpc('get_broker_holding_data', {
+            p_start_date: startDate,
+            p_end_date: endDate,
+            p_symbol: symbol || null,
+            p_broker_id: broker_id,
+            p_route: dataType,
+            p_type: type || null,
+            p_sort_by: sort_by || null,
+            p_sort_order: sort_order || 'asc',
+            p_page: pageNum,
+            p_limit: safeLimit
+        });
 
-        // ── Summary over all rows ────────────────────────────────────────────
-        const summary = computeSummary(allRows, dataType);
+        let summary, symbolSummary, brokerSummary, totalRecords, rows;
 
-        // ── Group and Sum if search filters are applied ──────────────────────
-        let processedRows = allRows;
-        if (broker_id && !symbol) {
-            // Group by symbol
-            const groups = {};
-            for (const row of allRows) {
-                const sym = row.symbol;
-                if (!groups[sym]) {
-                    groups[sym] = {
-                        date: '—',
-                        symbol: sym,
-                        broker_id: broker_id,
-                        buy_qty: 0, buy_amount: 0,
-                        sell_qty: 0, sell_amount: 0,
-                        holding_qty: 0, holding_amount: 0
-                    };
-                }
-                if (dataType === 'buy') {
-                    groups[sym].buy_qty += Number(row.buy_qty || 0);
-                    groups[sym].buy_amount += Number(row.buy_amount || 0);
-                } else if (dataType === 'sell') {
-                    groups[sym].sell_qty += Number(row.sell_qty || 0);
-                    groups[sym].sell_amount += Number(row.sell_amount || 0);
-                } else {
-                    groups[sym].holding_qty += Number(row.holding_qty || 0);
-                    groups[sym].holding_amount += Number(row.holding_amount || 0);
-                }
-            }
-            processedRows = Object.values(groups);
-        } else if (symbol && !broker_id) {
-            // Group by broker_id
-            const groups = {};
-            for (const row of allRows) {
-                const bId = row.broker_id;
-                if (!groups[bId]) {
-                    groups[bId] = {
-                        date: '—',
-                        symbol: symbol,
-                        broker_id: bId,
-                        buy_qty: 0, buy_amount: 0,
-                        sell_qty: 0, sell_amount: 0,
-                        holding_qty: 0, holding_amount: 0
-                    };
-                }
-                if (dataType === 'buy') {
-                    groups[bId].buy_qty += Number(row.buy_qty || 0);
-                    groups[bId].buy_amount += Number(row.buy_amount || 0);
-                } else if (dataType === 'sell') {
-                    groups[bId].sell_qty += Number(row.sell_qty || 0);
-                    groups[bId].sell_amount += Number(row.sell_amount || 0);
-                } else {
-                    groups[bId].holding_qty += Number(row.holding_qty || 0);
-                    groups[bId].holding_amount += Number(row.holding_amount || 0);
-                }
-            }
-            processedRows = Object.values(groups);
+        if (!rpcError && rpcData) {
+            summary = rpcData.summary;
+            symbolSummary = rpcData.symbolSummary;
+            brokerSummary = rpcData.brokerSummary;
+            totalRecords = rpcData.total || 0;
+            rows = rpcData.data || [];
+        } else {
+            // ── Fallback Mode if RPC function does not exist in Supabase DB yet ─
+            console.warn('RPC function error or not installed, executing direct PostgREST query:', rpcError?.message);
+
+            let selectStr = dataType === 'buy'   ? 'date, symbol, broker_id, buy_qty, buy_amount' :
+                            dataType === 'sell'  ? 'date, symbol, broker_id, sell_qty, sell_amount' :
+                                                   'date, symbol, broker_id, holding_qty, holding_amount';
+
+            let query = supabase
+                .from('broker_holding')
+                .select(selectStr, { count: 'exact' })
+                .gte('date', startDate)
+                .lte('date', endDate)
+                .range(offset, offset + safeLimit - 1);
+
+            if (symbol) query = query.eq('symbol', symbol);
+            if (broker_id) query = query.eq('broker_id', broker_id);
+            if (dataType === 'holding' && type === 'Buy') query = query.gt('holding_qty', 0);
+            if (dataType === 'holding' && type === 'Sell') query = query.lt('holding_qty', 0);
+
+            const sortCol = sort_by || (dataType === 'buy' ? 'buy_qty' : dataType === 'sell' ? 'sell_qty' : 'holding_qty');
+            query = query.order(sortCol, { ascending: sort_order !== 'desc' });
+
+            const { data: fbData, count, error: fbError } = await query;
+            if (fbError) throw new Error(`Database query failed: ${fbError.message}`);
+
+            rows = fbData || [];
+            totalRecords = count || rows.length;
+            summary = {
+                buyQuantity: 0, sellQuantity: 0, holdingQuantity: 0,
+                buyAmount: 0, sellAmount: 0, netAmount: 0,
+                averageBuyPrice: 0, averageSellPrice: 0
+            };
         }
 
-        // ── Apply type filter only for holding route (Buy = positive, Sell = negative) ─
-        if (dataType === 'holding' && type) {
-            if (type === 'Buy')  processedRows = processedRows.filter(r => Number(r.holding_qty || 0) > 0);
-            if (type === 'Sell') processedRows = processedRows.filter(r => Number(r.holding_qty || 0) < 0);
-        }
-
-        // ── Map rows to response shape (only relevant fields) ────────────────
+        // ── Field filtering ──────────────────────────────────────────────────
         const fieldMap = {
             buy:     ['date', 'symbol', 'broker_id', 'buy_qty', 'buy_amount'],
             sell:    ['date', 'symbol', 'broker_id', 'sell_qty', 'sell_amount'],
             holding: ['date', 'symbol', 'broker_id', 'holding_qty', 'holding_amount'],
         };
         const allowedFields = fieldMap[dataType];
-
         let selectedFields = allowedFields;
         if (fields) {
             const requested = fields.split(',').map(f => f.trim());
@@ -346,7 +244,7 @@ export default async function handler(req, res) {
             if (selectedFields.length === 0) selectedFields = allowedFields;
         }
 
-        const mappedRows = processedRows.map(row => {
+        const mappedRows = rows.map(row => {
             const obj = {};
             for (const field of selectedFields) {
                 if (field === 'date' || field === 'symbol' || field === 'broker_id') {
@@ -358,75 +256,7 @@ export default async function handler(req, res) {
             return obj;
         });
 
-        // ── Optional sorting ────────────────────────────────────────────────
-        const sortableColumns = dataType === 'buy'   ? ['buy_qty', 'buy_amount'] :
-                                dataType === 'sell'  ? ['sell_qty', 'sell_amount'] :
-                                                       ['holding_qty', 'holding_amount'];
-        // Add common fields
-        const allSortable = ['symbol', 'broker_id', ...sortableColumns];
-        if (sort_by && allSortable.includes(sort_by)) {
-            const direction = sort_order === 'desc' ? -1 : 1;
-            mappedRows.sort((a, b) => {
-                const aVal = a[sort_by];
-                const bVal = b[sort_by];
-                if (aVal < bVal) return -1 * direction;
-                if (aVal > bVal) return 1 * direction;
-                return 0;
-            });
-        }
-
-        // ── Client‑side pagination ───────────────────────────────────────────
-        const pageNum  = parseInt(page  || '1',    10);
-        const limitNum = parseInt(limit || '500', 10); //CHANGE FOR LIMIT
-        const safeLimit = Math.min(Math.max(limitNum, 1), 1000);
-        const offset = (pageNum - 1) * safeLimit;
-        const paginatedRows = mappedRows.slice(offset, offset + safeLimit);
-
-        // ── Extra Calculations (symbol / broker summary) ─────────────────────
-        let symbolSummary = null;
-        let brokerSummary = null;
-
-        if (broker_id && !symbol) {
-            const groups = {};
-            for (const row of allRows) {
-                const sym = row.symbol;
-                if (!groups[sym]) groups[sym] = [];
-                groups[sym].push(row);
-            }
-            symbolSummary = Object.entries(groups).map(([sym, rows]) => ({
-                symbol: sym,
-                ...computeSummary(rows, dataType)
-            })).sort((a, b) => {
-                const aQty = dataType === 'buy' ? a.totalBuyQty :
-                             dataType === 'sell' ? a.totalSellQty :
-                             a.holdingQuantity;
-                const bQty = dataType === 'buy' ? b.totalBuyQty :
-                             dataType === 'sell' ? b.totalSellQty :
-                             b.holdingQuantity;
-                return Math.abs(bQty) - Math.abs(aQty);
-            });
-        } else if (symbol && !broker_id) {
-            const groups = {};
-            for (const row of allRows) {
-                const bId = row.broker_id;
-                if (!groups[bId]) groups[bId] = [];
-                groups[bId].push(row);
-            }
-            brokerSummary = Object.entries(groups).map(([bId, rows]) => ({
-                broker_id: Number(bId),
-                ...computeSummary(rows, dataType)
-            })).sort((a, b) => {
-                const aQty = dataType === 'buy' ? a.totalBuyQty :
-                             dataType === 'sell' ? a.totalSellQty :
-                             a.holdingQuantity;
-                const bQty = dataType === 'buy' ? b.totalBuyQty :
-                             dataType === 'sell' ? b.totalSellQty :
-                             b.holdingQuantity;
-                return Math.abs(bQty) - Math.abs(aQty);
-            });
-        }
-
-        // ── Response ─────────────────────────────────────────────────────────
+        // ── Response structure ───────────────────────────────────────────────
         const response = {
             success: true,
             filters: {
@@ -440,18 +270,18 @@ export default async function handler(req, res) {
                 endDate,
             },
             summary,
-            ...(symbolSummary && { symbolSummary }),
-            ...(brokerSummary && { brokerSummary }),
+            ...(symbolSummary && symbolSummary.length > 0 && { symbolSummary }),
+            ...(brokerSummary && brokerSummary.length > 0 && { brokerSummary }),
             pagination: {
-                total:      mappedRows.length,
+                total:      totalRecords,
                 page:       pageNum,
                 limit:      safeLimit,
-                totalPages: Math.ceil(mappedRows.length / safeLimit),
+                totalPages: Math.ceil(totalRecords / safeLimit),
             },
-            data: paginatedRows,
+            data: mappedRows,
         };
 
-        if (allRows.length === 0) {
+        if (totalRecords === 0) {
             response.message = 'No records found for the given filters';
         }
 
