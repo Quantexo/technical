@@ -1,7 +1,18 @@
 // ─── CORS helper ─────────────────────────────────────────────
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+const ALLOWED_ORIGINS = [
+  'http://localhost:5600',
+  'http://localhost:5500',
+  'https://nepsehub.vercel.app',
+];
+
+function cors(req, res) {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Vary', 'Origin');
 }
 
 async function proxy(url, headers = {}) {
@@ -14,7 +25,7 @@ async function proxy(url, headers = {}) {
 
 // ─── Route dispatcher ─────────────────────────────────────────
 export default async function handler(req, res) {
-  cors(res);
+  cors(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const route = req.query.route;
