@@ -212,47 +212,76 @@ export default async function handler(req, res) {
             // ── Fallback Mode if RPC function does not exist in Supabase DB yet ─
             console.warn('RPC function error or not installed, executing direct PostgREST query:', rpcError?.message);
 
-            // For multi-date ranges (1M, 3M, 6M etc.), aggregate by (symbol, broker_id)
-            // so that the same broker doesn't repeat for every trading day.
             const isMultiDay = startDate !== endDate;
 
-            let selectStr;
-            if (isMultiDay) {
-                // Aggregate: sum quantities across the date range per broker
-                selectStr = dataType === 'buy'
-                    ? 'symbol, broker_id, buy_qty.sum(), buy_amount.sum()'
-                    : dataType === 'sell'
-                    ? 'symbol, broker_id, sell_qty.sum(), sell_amount.sum()'
-                    : 'symbol, broker_id, holding_qty.sum(), holding_amount.sum()';
-            } else {
-                selectStr = dataType === 'buy'   ? 'date, symbol, broker_id, buy_qty, buy_amount' :
-                            dataType === 'sell'  ? 'date, symbol, broker_id, sell_qty, sell_amount' :
-                                                   'date, symbol, broker_id, holding_qty, holding_amount';
-            }
+            // Always fetch raw rows — PostgREST does NOT support aggregate functions
+            const selectStr = dataType === 'buy'  ? 'date, symbol, broker_id, buy_qty, buy_amount' :
+                              dataType === 'sell' ? 'date, symbol, broker_id, sell_qty, sell_amount' :
+                                                    'date, symbol, broker_id, holding_qty, holding_amount';
+
+            // For multi-day ranges, fetch up to 5000 raw rows then aggregate in JS
+            const fetchLimit = isMultiDay ? 5000 : safeLimit;
+            const fetchOffset = isMultiDay ? 0 : offset;
 
             let query = supabase
                 .from('broker_holding')
                 .select(selectStr, { count: 'exact' })
                 .gte('date', startDate)
                 .lte('date', endDate)
-                .range(offset, offset + safeLimit - 1);
+                .range(fetchOffset, fetchOffset + fetchLimit - 1);
 
             if (symbol) query = query.eq('symbol', symbol);
             if (broker_id) query = query.eq('broker_id', broker_id);
-            // type filter: Buy = positive net holding, Sell = negative net holding
             if (dataType === 'holding' && type === 'Buy')  query = query.gt('holding_qty', 0);
             if (dataType === 'holding' && type === 'Sell') query = query.lt('holding_qty', 0);
 
-            // Default sort DESC so largest holdings (positive) appear first
-            const sortCol = sort_by || (dataType === 'buy' ? 'buy_qty' : dataType === 'sell' ? 'sell_qty' : 'holding_qty');
-            const sortAscending = sort_order === 'asc';  // default is desc
-            query = query.order(sortCol, { ascending: sortAscending });
+            // For single-day queries, sort at DB level; for multi-day we sort after aggregation
+            if (!isMultiDay) {
+                const sortCol = sort_by || (dataType === 'buy' ? 'buy_qty' : dataType === 'sell' ? 'sell_qty' : 'holding_qty');
+                const sortAscending = sort_order === 'asc';
+                query = query.order(sortCol, { ascending: sortAscending });
+            }
 
             const { data: fbData, count, error: fbError } = await query;
             if (fbError) throw new Error(`Database query failed: ${fbError.message}`);
 
-            rows = fbData || [];
-            totalRecords = count || rows.length;
+            let rawRows = fbData || [];
+
+            if (isMultiDay) {
+                // ── JS-side aggregation: group by (symbol, broker_id) ──────────
+                const qtyKey    = dataType === 'buy' ? 'buy_qty'    : dataType === 'sell' ? 'sell_qty'    : 'holding_qty';
+                const amountKey = dataType === 'buy' ? 'buy_amount' : dataType === 'sell' ? 'sell_amount' : 'holding_amount';
+
+                const map = new Map();
+                for (const row of rawRows) {
+                    const key = `${row.symbol}|${row.broker_id}`;
+                    if (!map.has(key)) {
+                        map.set(key, { symbol: row.symbol, broker_id: row.broker_id, [qtyKey]: 0, [amountKey]: 0 });
+                    }
+                    const agg = map.get(key);
+                    agg[qtyKey]    += Number(row[qtyKey]    || 0);
+                    agg[amountKey] += Number(row[amountKey] || 0);
+                }
+
+                let aggregated = Array.from(map.values());
+
+                // Sort the aggregated results
+                const sortKey = sort_by || qtyKey;
+                const sortDir = sort_order === 'asc' ? 1 : -1;   // default desc
+                aggregated.sort((a, b) => sortDir * ((a[sortKey] || 0) - (b[sortKey] || 0)));
+
+                // Re-apply type filter on net aggregated value (positive / negative)
+                if (dataType === 'holding' && type === 'Buy')  aggregated = aggregated.filter(r => r[qtyKey] > 0);
+                if (dataType === 'holding' && type === 'Sell') aggregated = aggregated.filter(r => r[qtyKey] < 0);
+
+                // Manual pagination on the aggregated result
+                totalRecords = aggregated.length;
+                rows = aggregated.slice(offset, offset + safeLimit);
+            } else {
+                rows = rawRows;
+                totalRecords = count || rawRows.length;
+            }
+
             summary = {
                 buyQuantity: 0, sellQuantity: 0, holdingQuantity: 0,
                 buyAmount: 0, sellAmount: 0, netAmount: 0,
