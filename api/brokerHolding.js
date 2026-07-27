@@ -184,6 +184,9 @@ export default async function handler(req, res) {
         const offset = (pageNum - 1) * safeLimit;
 
         // ── Try PostgreSQL RPC Function (Server-side 50ms aggregation) ──────
+        // Default sort: desc for holding (show largest positive holdings first),
+        //               desc for buy/sell (show largest quantities first)
+        const defaultSortOrder = 'desc';
         const { data: rpcData, error: rpcError } = await supabase.rpc('get_broker_holding_data', {
             p_start_date: startDate,
             p_end_date: endDate,
@@ -192,7 +195,7 @@ export default async function handler(req, res) {
             p_route: dataType,
             p_type: type || null,
             p_sort_by: sort_by || null,
-            p_sort_order: sort_order || 'asc',
+            p_sort_order: sort_order || defaultSortOrder,
             p_page: pageNum,
             p_limit: safeLimit
         });
@@ -209,9 +212,23 @@ export default async function handler(req, res) {
             // ── Fallback Mode if RPC function does not exist in Supabase DB yet ─
             console.warn('RPC function error or not installed, executing direct PostgREST query:', rpcError?.message);
 
-            let selectStr = dataType === 'buy'   ? 'date, symbol, broker_id, buy_qty, buy_amount' :
+            // For multi-date ranges (1M, 3M, 6M etc.), aggregate by (symbol, broker_id)
+            // so that the same broker doesn't repeat for every trading day.
+            const isMultiDay = startDate !== endDate;
+
+            let selectStr;
+            if (isMultiDay) {
+                // Aggregate: sum quantities across the date range per broker
+                selectStr = dataType === 'buy'
+                    ? 'symbol, broker_id, buy_qty.sum(), buy_amount.sum()'
+                    : dataType === 'sell'
+                    ? 'symbol, broker_id, sell_qty.sum(), sell_amount.sum()'
+                    : 'symbol, broker_id, holding_qty.sum(), holding_amount.sum()';
+            } else {
+                selectStr = dataType === 'buy'   ? 'date, symbol, broker_id, buy_qty, buy_amount' :
                             dataType === 'sell'  ? 'date, symbol, broker_id, sell_qty, sell_amount' :
                                                    'date, symbol, broker_id, holding_qty, holding_amount';
+            }
 
             let query = supabase
                 .from('broker_holding')
@@ -222,11 +239,14 @@ export default async function handler(req, res) {
 
             if (symbol) query = query.eq('symbol', symbol);
             if (broker_id) query = query.eq('broker_id', broker_id);
-            if (dataType === 'holding' && type === 'Buy') query = query.gt('holding_qty', 0);
+            // type filter: Buy = positive net holding, Sell = negative net holding
+            if (dataType === 'holding' && type === 'Buy')  query = query.gt('holding_qty', 0);
             if (dataType === 'holding' && type === 'Sell') query = query.lt('holding_qty', 0);
 
+            // Default sort DESC so largest holdings (positive) appear first
             const sortCol = sort_by || (dataType === 'buy' ? 'buy_qty' : dataType === 'sell' ? 'sell_qty' : 'holding_qty');
-            query = query.order(sortCol, { ascending: sort_order !== 'desc' });
+            const sortAscending = sort_order === 'asc';  // default is desc
+            query = query.order(sortCol, { ascending: sortAscending });
 
             const { data: fbData, count, error: fbError } = await query;
             if (fbError) throw new Error(`Database query failed: ${fbError.message}`);
@@ -241,10 +261,12 @@ export default async function handler(req, res) {
         }
 
         // ── Field filtering ──────────────────────────────────────────────────
+        // For multi-day aggregated fallback, 'date' is not part of the response
+        const isAggregatedFallback = !rpcData && startDate !== endDate;
         const fieldMap = {
-            buy:     ['date', 'symbol', 'broker_id', 'buy_qty', 'buy_amount'],
-            sell:    ['date', 'symbol', 'broker_id', 'sell_qty', 'sell_amount'],
-            holding: ['date', 'symbol', 'broker_id', 'holding_qty', 'holding_amount'],
+            buy:     isAggregatedFallback ? ['symbol', 'broker_id', 'buy_qty', 'buy_amount']    : ['date', 'symbol', 'broker_id', 'buy_qty', 'buy_amount'],
+            sell:    isAggregatedFallback ? ['symbol', 'broker_id', 'sell_qty', 'sell_amount']  : ['date', 'symbol', 'broker_id', 'sell_qty', 'sell_amount'],
+            holding: isAggregatedFallback ? ['symbol', 'broker_id', 'holding_qty', 'holding_amount'] : ['date', 'symbol', 'broker_id', 'holding_qty', 'holding_amount'],
         };
         const allowedFields = fieldMap[dataType];
         let selectedFields = allowedFields;
