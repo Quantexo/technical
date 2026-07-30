@@ -258,7 +258,8 @@ export default async function handler(req, res) {
 
   // Authentication
   const secret = req.query.secret;
-  if (secret !== 'test123') {
+  const expectedSecret = process.env.ADMIN_SECRET_KEY || 'test123';
+  if (!secret || secret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
