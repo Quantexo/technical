@@ -273,11 +273,11 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-    // Authentication
+    // Authentication: Require ADMIN_SECRET_KEY environment variable
     const secret = req.query.secret;
-    const expectedSecret = process.env.ADMIN_SECRET_KEY || 'test123';
-    if (!secret || secret !== expectedSecret) {
-        return res.status(401).json({ error: 'Unauthorized' });
+    const expectedSecret = process.env.ADMIN_SECRET_KEY;
+    if (!expectedSecret || !secret || secret !== expectedSecret) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or missing ADMIN_SECRET_KEY' });
     }
 
     // Pagination parameters for symbols
