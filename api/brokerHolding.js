@@ -3,9 +3,9 @@ import { createClient } from '@supabase/supabase-js';
 
 // ─── Supabase client — Broker Holdings DB ─
 const supabaseUrl = process.env.SUPABASE_URL_2;
-const supabaseKey = process.env.SUPABASE_ANON_KEY_2;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY_2 || process.env.SUPABASE_ANON_KEY_2 || process.env.SUPABASE_KEY_2;
 if (!supabaseUrl || !supabaseKey) {
-    throw new Error('Missing SUPABASE_URL_2 or SUPABASE_ANON_KEY_2 environment variables');
+    throw new Error('Missing SUPABASE_URL_2 or SUPABASE_SERVICE_ROLE_KEY_2 environment variables');
 }
 const supabase = createClient(supabaseUrl, supabaseKey);
 
