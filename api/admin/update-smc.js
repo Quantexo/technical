@@ -33,30 +33,68 @@ function detectSwings(symbol, df) {
 /**
  * Detect Fair Value Gaps (FVG) using 3‑candle rule
  */
-function detectFVG(symbol, df) {
+function detectFVG(symbol, df, swings) {
   const fvgs = [];
   const lookback = 3;
-  for (let i = lookback; i < df.length; i++) {
-    const current = df[i];
-    const previous = df[i - lookback];
-    if (current.low > previous.high) {
-      fvgs.push({
-        symbol,
-        start_time: previous.time,
-        end_time: current.time,
-        high: current.low,
-        low: previous.high,
-        fvg_type: 'bullish'
-      });
-    } else if (current.high < previous.low) {
-      fvgs.push({
-        symbol,
-        start_time: previous.time,
-        end_time: current.time,
-        high: previous.low,
-        low: current.high,
-        fvg_type: 'bearish'
-      });
+
+  const swingHighs = swings.filter(s => s.swing_type === 'high').sort((a, b) => a.timestamp - b.timestamp);
+  const swingLows = swings.filter(s => s.swing_type === 'low').sort((a, b) => a.timestamp - b.timestamp);
+
+  // Bullish FVG after a higher high (BOS)
+  for (let i = 1; i < swingHighs.length; i++) {
+    const prevHigh = swingHighs[i - 1];
+    const currHigh = swingHighs[i];
+    if (currHigh.price > prevHigh.price) {
+      const startIdx = df.findIndex(c => c.time === currHigh.timestamp);
+      if (startIdx < 0) continue;
+      for (let j = startIdx + lookback; j < df.length; j++) {
+        if (df[j].low > df[j - lookback].high) {
+          const gapCandle = df[j];
+          const closeToHighRatio = (gapCandle.high - gapCandle.close) / (gapCandle.high - gapCandle.low);
+          if (closeToHighRatio < 0.05) {
+            if (j + 2 < df.length && df[j + 1].close > df[j + 1].open && df[j + 2].close > df[j + 2].open) {
+              fvgs.push({
+                symbol,
+                start_time: df[j - lookback].time,
+                end_time: gapCandle.time,
+                high: gapCandle.low,
+                low: df[j - lookback].high,
+                fvg_type: 'bullish'
+              });
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Bearish FVG after a lower low (BOS)
+  for (let i = 1; i < swingLows.length; i++) {
+    const prevLow = swingLows[i - 1];
+    const currLow = swingLows[i];
+    if (currLow.price < prevLow.price) {
+      const startIdx = df.findIndex(c => c.time === currLow.timestamp);
+      if (startIdx < 0) continue;
+      for (let j = startIdx + lookback; j < df.length; j++) {
+        if (df[j].high < df[j - lookback].low) {
+          const gapCandle = df[j];
+          const closeToLowRatio = (gapCandle.close - gapCandle.low) / (gapCandle.high - gapCandle.low);
+          if (closeToLowRatio < 0.05) {
+            if (j + 2 < df.length && df[j + 1].close < df[j + 1].open && df[j + 2].close < df[j + 2].open) {
+              fvgs.push({
+                symbol,
+                start_time: df[j - lookback].time,
+                end_time: gapCandle.time,
+                high: df[j - lookback].low,
+                low: gapCandle.high,
+                fvg_type: 'bearish'
+              });
+              break;
+            }
+          }
+        }
+      }
     }
   }
   return fvgs;
@@ -240,7 +278,7 @@ export default async function handler(req, res) {
 
         // Detect SMC indicators
         const swings = detectSwings(sym, df);
-        const fvgs = detectFVG(sym, df);
+        const fvgs = detectFVG(sym, df, swings);
         const obs = detectOrderBlocks(sym, df, swings);
         const bos = detectBOS_CHoCH(sym, df, swings);
 
