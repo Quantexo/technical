@@ -1,9 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
 // ------------------------------------------------------------
-// SMC Detection Functions (same as before)
+// SMC Detection Functions
 // ------------------------------------------------------------
 
+/**
+ * Detect Swing Highs and Lows
+ */
 function detectSwings(symbol, df) {
   const swings = [];
   const windowSize = 5;
@@ -27,6 +30,9 @@ function detectSwings(symbol, df) {
   return swings;
 }
 
+/**
+ * Detect Fair Value Gaps (FVG) using 3‑candle rule
+ */
 function detectFVG(symbol, df) {
   const fvgs = [];
   const lookback = 3;
@@ -56,6 +62,9 @@ function detectFVG(symbol, df) {
   return fvgs;
 }
 
+/**
+ * Detect Order Blocks (simplified)
+ */
 function detectOrderBlocks(symbol, df, swings) {
   const obs = [];
   const avgRange = df.reduce((sum, c) => sum + (c.high - c.low), 0) / df.length;
@@ -94,6 +103,9 @@ function detectOrderBlocks(symbol, df, swings) {
   return obs;
 }
 
+/**
+ * Detect Break of Structure (BOS) and Change of Character (CHoCH)
+ */
 function detectBOS_CHoCH(symbol, df, swings) {
   const signals = [];
   const sortedSwings = [...swings].sort((a, b) => a.timestamp - b.timestamp);
@@ -130,7 +142,7 @@ function detectBOS_CHoCH(symbol, df, swings) {
 }
 
 // ------------------------------------------------------------
-// Main Handler with pagination (offset & limit)
+// Main Handler – supports offset & limit for symbol batching
 // ------------------------------------------------------------
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -138,26 +150,27 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  // Get secret from env or hardcode
+  // Authentication: use ADMIN_SECRET_KEY environment variable
   const secret = req.query.secret;
   const expectedSecret = process.env.ADMIN_SECRET_KEY;
   if (!expectedSecret || !secret || secret !== expectedSecret) {
     return res.status(401).json({ error: 'Unauthorized: Invalid or missing ADMIN_SECRET_KEY' });
   }
 
+  // Pagination parameters
+  const offset = parseInt(req.query.offset) || 0;
+  const limit = Math.min(parseInt(req.query.limit) || 10, 50); // max 50 per batch
+
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !supabaseKey) {
+    console.error('Missing Supabase credentials');
     return res.status(500).json({ error: 'Supabase credentials missing' });
   }
   const supabase = createClient(supabaseUrl, supabaseKey);
 
-  // Parse pagination parameters
-  const offset = parseInt(req.query.offset) || 0;
-  const limit = Math.min(parseInt(req.query.limit) || 10, 50); // max 50 per batch
-
   try {
-    // 1. Get all distinct symbols (paginated to avoid huge list)
+    // 1. Get the full list of distinct symbols (sorted)
     let allRows = [];
     let from = 0;
     const pageSize = 1000;
@@ -187,11 +200,11 @@ export default async function handler(req, res) {
       });
     }
 
-    // 3. Process each symbol sequentially
+    // 3. Process each symbol sequentially (to avoid timeouts)
     const results = [];
-    for (const symbol of symbolsToProcess) {
+    for (const sym of symbolsToProcess) {
       try {
-        // Fetch all data for this symbol (pagination inside)
+        // Fetch all data for this symbol (paginated)
         let allData = [];
         let from = 0;
         const pageSize = 1000;
@@ -199,9 +212,9 @@ export default async function handler(req, res) {
         while (hasMore) {
           const { data, error } = await supabase
             .from('prices')
-            .select('time, open, high, low, close, volume')
-            .eq('symbol', symbol)
-            .order('time', { ascending: true })
+            .select('date, open, high, low, close, volume')
+            .eq('symbol', sym)
+            .order('date', { ascending: true })
             .range(from, from + pageSize - 1);
           if (error) throw error;
           if (!data || data.length === 0) break;
@@ -211,12 +224,13 @@ export default async function handler(req, res) {
         }
 
         if (allData.length < 10) {
-          results.push({ symbol, status: 'skipped', reason: 'insufficient data' });
+          results.push({ symbol: sym, status: 'skipped', reason: 'insufficient data' });
           continue;
         }
 
+        // Convert to DF with 'time' field for SMC functions (using 'date' from table)
         const df = allData.map(d => ({
-          time: new Date(d.time),
+          time: new Date(d.date),   // ✅ using 'date' column
           open: parseFloat(d.open),
           high: parseFloat(d.high),
           low: parseFloat(d.low),
@@ -225,12 +239,12 @@ export default async function handler(req, res) {
         }));
 
         // Detect SMC indicators
-        const swings = detectSwings(symbol, df);
-        const fvgs = detectFVG(symbol, df);
-        const obs = detectOrderBlocks(symbol, df, swings);
-        const bos = detectBOS_CHoCH(symbol, df, swings);
+        const swings = detectSwings(sym, df);
+        const fvgs = detectFVG(sym, df);
+        const obs = detectOrderBlocks(sym, df, swings);
+        const bos = detectBOS_CHoCH(sym, df, swings);
 
-        // Upsert with conflict handling
+        // Upsert into SMC tables with conflict handling
         if (swings.length) {
           await supabase.from('smc_swings').upsert(swings, { onConflict: 'symbol, timestamp, swing_type' });
         }
@@ -245,19 +259,20 @@ export default async function handler(req, res) {
         }
 
         results.push({
-          symbol,
+          symbol: sym,
           status: 'success',
           counts: { swings: swings.length, fvgs: fvgs.length, obs: obs.length, bos: bos.length }
         });
       } catch (err) {
-        console.error(`Error processing ${symbol}:`, err);
-        results.push({ symbol, status: 'failed', error: err.message });
+        console.error(`Error processing ${sym}:`, err);
+        results.push({ symbol: sym, status: 'failed', error: err.message });
       }
+      console.log(`Processed ${sym} (${results.length}/${symbolsToProcess.length})`);
     }
 
     const nextOffset = offset + symbolsToProcess.length;
     return res.status(200).json({
-      message: 'Batch processed',
+      message: 'SMC batch processed',
       total_symbols: totalSymbols,
       processed_symbols: symbolsToProcess.length,
       next_offset: nextOffset,
