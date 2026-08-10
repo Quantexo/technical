@@ -17,6 +17,7 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5600',
   'http://localhost:5500',
   'https://nepsehub.vercel.app',
+  'https://nepsehub-admin.onrender.com/',
 ];
 
 function cors(req, res) {

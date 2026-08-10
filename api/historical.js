@@ -27,6 +27,7 @@ export default async function handler(req, res) {
     'http://localhost:5600',
     'http://localhost:5500',
     'https://nepsehub.vercel.app',
+    'https://nepsehub-admin.onrender.com/',
   ];
   const origin = req.headers.origin;
   if (ALLOWED_ORIGINS.includes(origin)) {
