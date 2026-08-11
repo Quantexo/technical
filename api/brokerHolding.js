@@ -112,18 +112,15 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-    const ALLOWED_ORIGINS = [
-      'http://localhost:5600',
-      'http://localhost:5500',
-      'https://nepsehub.vercel.app',
-      'https://nepsehub-admin.onrender.com/',
-    ];
     const origin = req.headers.origin;
-    if (ALLOWED_ORIGINS.includes(origin)) {
+    if (origin) {
       res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
     res.setHeader('Vary', 'Origin');
     if (req.method === 'OPTIONS') return res.status(200).end();
     if (req.method !== 'GET') {
