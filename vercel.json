@@ -4,13 +4,21 @@
     "api/stock-profile.js": { "maxDuration": 15 },
     "api/brokerHolding.js": { "maxDuration": 15 }
   },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Credentials", "value": "true" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET,OPTIONS,PATCH,DELETE,POST,PUT" },
+        { "key": "Access-Control-Allow-Headers", "value": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization" }
+      ]
+    }
+  ],
   "rewrites": [
     { "source": "/market-status", "destination": "/api/market-status" },
 
     { "source": "/api/core/live-nepse",       "destination": "/api/core?route=live-nepse" },
-    { "source": "/api/core/market-turnover",  "destination": "/api/core?route=market-turnover" },
-    { "source": "/api/core/index-live",       "destination": "/api/core?route=index-live" },
-    { "source": "/api/core/subindex-live",    "destination": "/api/core?route=subindex-live" },
     { "source": "/api/core/homepage-data",    "destination": "/api/core?route=homepage-data" },
     { "source": "/api/core/floorsheet/totals","destination": "/api/core?route=floorsheet-totals" },
     { "source": "/api/core/floorsheet",       "destination": "/api/core?route=floorsheet" },
