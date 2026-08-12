@@ -19,6 +19,9 @@
     { "source": "/market-status", "destination": "/api/market-status" },
 
     { "source": "/api/core/live-nepse",       "destination": "/api/core?route=live-nepse" },
+    { "source": "/api/core/market-turnover",  "destination": "/api/core?route=market-turnover" },
+    { "source": "/api/core/index-live",       "destination": "/api/core?route=index-live" },
+    { "source": "/api/core/subindex-live",    "destination": "/api/core?route=subindex-live" },
     { "source": "/api/core/homepage-data",    "destination": "/api/core?route=homepage-data" },
     { "source": "/api/core/floorsheet/totals","destination": "/api/core?route=floorsheet-totals" },
     { "source": "/api/core/floorsheet",       "destination": "/api/core?route=floorsheet" },
