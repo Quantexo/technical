@@ -40,17 +40,7 @@ export default async function handler(req, res) {
         return res.status(200).json(data);
       }
 
-      case 'index-live': {
-        const ts = Date.now();
-        const data = await proxy(`https://nepalipaisa.com/api/GetIndexLive?_=${ts}`, { Referer: 'https://nepalipaisa.com' });
-        return res.status(200).json(data);
-      }
 
-      case 'subindex-live': {
-        const ts = Date.now();
-        const data = await proxy(`https://nepalipaisa.com/api/GetSubIndexLive?_=${ts}`, { Referer: 'https://nepalipaisa.com' });
-        return res.status(200).json(data);
-      }
 
       case 'homepage-data': {
         const data = await proxy('https://sharehubnepal.com/live/api/v2/nepselive/home-page-data');
@@ -88,7 +78,7 @@ export default async function handler(req, res) {
       }
 
       default:
-        return res.status(400).json({ error: `Unknown route: "${route}". Valid routes: live-nepse, market-turnover, index-live, subindex-live, homepage-data, floorsheet, floorsheet-totals` });
+        return res.status(400).json({ error: `Unknown route: "${route}". Valid routes: live-nepse, market-turnover, homepage-data, floorsheet, floorsheet-totals` });
     }
   } catch (err) {
     console.error(`[core] route=${route} error:`, err);
