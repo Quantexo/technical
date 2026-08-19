@@ -81,9 +81,57 @@ export default async function handler(req, res) {
     obv_min,           // obv >= obv_min
   } = req.query;
 
+  // ── Special route: heatmap bulk fetch for a date ─────────────────────────────
+  if (req.query.route === 'heatmap') {
+    const date = req.query.date;
+    if (!date) return res.status(400).json({ error: 'Missing required parameter: date (YYYY-MM-DD)' });
+
+    // Fetch selected date + 1 previous trading day's close for % change calculation
+    const { data: dayData, error: dayErr } = await supabase
+      .from('historical_technical_indicators')
+      .select('symbol, date, close, volume')
+      .eq('date', date);
+
+    if (dayErr) return res.status(500).json({ error: dayErr.message });
+    if (!dayData || dayData.length === 0) {
+      return res.status(404).json({ error: `No market data found for date: ${date}` });
+    }
+
+    // Get previous trading day data to compute % change
+    const { data: prevData } = await supabase
+      .from('historical_technical_indicators')
+      .select('symbol, close')
+      .lt('date', date)
+      .order('date', { ascending: false })
+      .limit(dayData.length * 2);
+
+    // Build prevClose map (most recent record before date for each symbol)
+    const prevMap = {};
+    (prevData || []).forEach(row => {
+      if (!prevMap[row.symbol]) prevMap[row.symbol] = row.close;
+    });
+
+    const result = dayData.map(row => {
+      const prevClose = prevMap[row.symbol] || row.close;
+      const changePercent = prevClose ? ((row.close - prevClose) / prevClose) * 100 : 0;
+      return {
+        symbol: row.symbol,
+        price: row.close,
+        previousClose: prevClose,
+        changePercent: parseFloat(changePercent.toFixed(2)),
+        volume: row.volume || 0,
+        turnover: row.volume ? row.close * row.volume : 0,
+        date: row.date,
+      };
+    });
+
+    return res.status(200).json({ success: true, date, count: result.length, data: result });
+  }
+
   if (!symbol) {
     return res.status(400).json({ error: 'Missing required parameter: symbol' });
   }
+
 
   // ── Resolve select fields ───────────────────────────────────────────────────
   const isVolumeOnly = volume_only === '1' || req.query.route === 'volume';
