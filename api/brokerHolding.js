@@ -149,45 +149,68 @@ export default async function handler(req, res) {
 
         // ── Broker Summary (Daily Turnover) sub-route ──────────────────────────────
         if (route === 'broker-summary') {
-            const { broker_id, memberId, start_date, end_date, date, trading_date, limit, page, sort_by, sort_order } = req.query;
+            const { broker_id, memberId, start_date, end_date, date, trading_date, period, limit, page, sort_by, sort_order } = req.query;
 
             try {
-                const clients = [supabase, supabaseMain].filter(Boolean);
+                const clients = [];
+                if (supabase) clients.push({ client: supabase, name: 'SUPABASE_URL_2' });
+                if (supabaseMain && supabaseMain !== supabase) clients.push({ client: supabaseMain, name: 'SUPABASE_URL' });
+
                 if (clients.length === 0) {
                     return res.status(500).json({ success: false, error: 'Database client not initialized' });
                 }
 
-                // ─── Step 1: Detect which client contains broker_daily_summary and find latest date ─
-                let activeClient = null;
-                let latestDate = date || trading_date || end_date;
+                // ─── Step 1: Find which client has broker_daily_summary and determine latest date ─
+                let activeClient = clients[0].client;
+                let latestDate = date || trading_date;
 
-                for (const client of clients) {
+                for (const { client } of clients) {
                     try {
-                        const { data, error } = await client
+                        const { data: latestRows, error: err } = await client
                             .from('broker_daily_summary')
                             .select('trading_date')
                             .order('trading_date', { ascending: false })
                             .limit(1);
 
-                        if (!error && data && data.length > 0) {
+                        if (!err && latestRows && latestRows.length > 0) {
                             activeClient = client;
                             if (!latestDate) {
-                                latestDate = data[0].trading_date;
+                                latestDate = latestRows[0].trading_date;
                             }
                             break;
                         }
                     } catch (_) {}
                 }
 
-                if (!activeClient) {
-                    activeClient = clients[0];
+                // ─── Step 2: Build date range from date, period, or start_date/end_date ─
+                let startDate = null;
+                let endDate = null;
+
+                if (date || trading_date) {
+                    startDate = date || trading_date;
+                    endDate = date || trading_date;
+                } else if (period) {
+                    const maxDateObj = latestDate ? new Date(latestDate + 'T00:00:00Z') : new Date();
+                    endDate = latestDate || formatDate(maxDateObj);
+
+                    switch (period.toUpperCase()) {
+                        case '1D': startDate = endDate; break;
+                        case '1W': startDate = formatDate(addDays(maxDateObj, -7)); break;
+                        case '1M': startDate = formatDate(addDays(maxDateObj, -30)); break;
+                        case '3M': startDate = formatDate(addDays(maxDateObj, -90)); break;
+                        case '6M': startDate = formatDate(addDays(maxDateObj, -180)); break;
+                        default:   startDate = formatDate(addDays(maxDateObj, -30));
+                    }
+                } else if (start_date || end_date) {
+                    startDate = start_date || latestDate;
+                    endDate = end_date || latestDate;
+                } else {
+                    // Default to latest single date
+                    startDate = latestDate;
+                    endDate = latestDate;
                 }
 
-                // ─── Step 2: Build date range ─────────────────────────────────────────
-                const targetSingleDate = date || trading_date;
-                const startDate = targetSingleDate || start_date || latestDate;
-                const endDate = targetSingleDate || end_date || latestDate;
-
+                const isMultiDay = startDate !== endDate;
                 const pageNum = parseInt(page || '1', 10);
                 const limitNum = parseInt(limit || '100', 10);
                 const safeLimit = Math.min(Math.max(limitNum, 1), 500);
@@ -198,36 +221,36 @@ export default async function handler(req, res) {
                     : 'total_turnover';
                 const isAsc = sort_order === 'asc';
 
-                // ─── Step 3: Query rows across clients ───────────────────────────────
-                let data = null;
-                let count = null;
+                // ─── Step 3: Query rows ───────────────────────────────────────────────
+                let rawRows = [];
+                let totalCount = 0;
                 let queryError = null;
 
-                for (const client of [activeClient, ...clients.filter(c => c !== activeClient)]) {
+                for (const { client } of clients) {
                     try {
-                        let query = client
-                            .from('broker_daily_summary')
-                            .select('*', { count: 'exact' });
-
+                        let query = client.from('broker_daily_summary').select('*');
                         if (startDate) query = query.gte('trading_date', startDate);
                         if (endDate) query = query.lte('trading_date', endDate);
 
                         if (brokerIdParam) {
                             const bId = parseInt(brokerIdParam, 10);
-                            if (!isNaN(bId)) {
-                                query = query.eq('broker_id', bId);
-                            }
+                            if (!isNaN(bId)) query = query.eq('broker_id', bId);
                         }
 
-                        const res = await query
-                            .order(sortByCol, { ascending: isAsc })
-                            .range(offset, offset + safeLimit - 1);
+                        // For multi-day, fetch raw rows (up to 5000) then aggregate in JS
+                        const fetchLimit = isMultiDay ? 5000 : safeLimit;
+                        if (!isMultiDay) {
+                            query = query.order(sortByCol, { ascending: isAsc }).range(offset, offset + safeLimit - 1);
+                        } else {
+                            query = query.limit(fetchLimit);
+                        }
 
+                        const res = await query;
                         if (!res.error && res.data) {
-                            data = res.data;
-                            count = res.count;
+                            rawRows = res.data;
+                            totalCount = res.count || res.data.length;
                             queryError = null;
-                            if (data.length > 0) break;
+                            if (rawRows.length > 0) break;
                         } else if (res.error) {
                             queryError = res.error;
                         }
@@ -236,11 +259,11 @@ export default async function handler(req, res) {
                     }
                 }
 
-                if (queryError && (!data || data.length === 0)) {
+                if (queryError && rawRows.length === 0) {
                     console.error('[Broker Summary] Query error:', queryError);
                     return res.status(500).json({
                         success: false,
-                        error: queryError.message || 'Query execution failed'
+                        error: queryError.message || 'Could not query broker_daily_summary table'
                     });
                 }
 
@@ -260,36 +283,90 @@ export default async function handler(req, res) {
                     }
                 } catch (_) {}
 
-                // ─── Step 5: Format response ──────────────────────────────────────────
-                const rows = data || [];
-                const totalRecords = count !== null && count !== undefined ? count : rows.length;
+                // ─── Step 5: Multi-day Aggregation (if date range spans > 1 day) ───────
+                let processedRows = [];
+                let summaryTotals = {
+                    totalBuy: 0,
+                    totalSell: 0,
+                    totalMatching: 0,
+                    totalTurnover: 0,
+                    brokerCount: 0
+                };
 
-                const formattedData = rows.map(row => ({
-                    broker_id: row.broker_id,
-                    broker_name: brokerNameMap[row.broker_id] || `Broker ${row.broker_id}`,
-                    total_buy: Number(row.total_buy || 0),
-                    total_sell: Number(row.total_sell || 0),
-                    total_matching: Number(row.total_matching || 0),
-                    total_turnover: Number(row.total_turnover || 0),
-                    trading_date: row.trading_date
-                }));
+                if (isMultiDay) {
+                    const brokerAggMap = new Map();
+                    for (const row of rawRows) {
+                        const bId = row.broker_id;
+                        if (!brokerAggMap.has(bId)) {
+                            brokerAggMap.set(bId, {
+                                broker_id: bId,
+                                broker_name: brokerNameMap[bId] || `Broker ${bId}`,
+                                total_buy: 0,
+                                total_sell: 0,
+                                total_matching: 0,
+                                total_turnover: 0,
+                                trading_date: `${startDate} to ${endDate}`
+                            });
+                        }
+                        const item = brokerAggMap.get(bId);
+                        item.total_buy += Number(row.total_buy || 0);
+                        item.total_sell += Number(row.total_sell || 0);
+                        item.total_matching += Number(row.total_matching || 0);
+                        item.total_turnover += Number(row.total_turnover || 0);
+                    }
+
+                    const allAggregated = Array.from(brokerAggMap.values());
+                    const sortDir = isAsc ? 1 : -1;
+                    allAggregated.sort((a, b) => sortDir * ((a[sortByCol] || 0) - (b[sortByCol] || 0)));
+
+                    // Calculate market summary totals across all brokers
+                    allAggregated.forEach(b => {
+                        summaryTotals.totalBuy += b.total_buy;
+                        summaryTotals.totalSell += b.total_sell;
+                        summaryTotals.totalMatching += b.total_matching;
+                        summaryTotals.totalTurnover += b.total_turnover;
+                    });
+                    summaryTotals.brokerCount = allAggregated.length;
+
+                    totalCount = allAggregated.length;
+                    processedRows = allAggregated.slice(offset, offset + safeLimit);
+                } else {
+                    processedRows = rawRows.map(row => {
+                        const b = {
+                            broker_id: row.broker_id,
+                            broker_name: brokerNameMap[row.broker_id] || `Broker ${row.broker_id}`,
+                            total_buy: Number(row.total_buy || 0),
+                            total_sell: Number(row.total_sell || 0),
+                            total_matching: Number(row.total_matching || 0),
+                            total_turnover: Number(row.total_turnover || 0),
+                            trading_date: row.trading_date
+                        };
+                        summaryTotals.totalBuy += b.total_buy;
+                        summaryTotals.totalSell += b.total_sell;
+                        summaryTotals.totalMatching += b.total_matching;
+                        summaryTotals.totalTurnover += b.total_turnover;
+                        return b;
+                    });
+                    summaryTotals.brokerCount = rawRows.length;
+                }
 
                 return res.status(200).json({
                     success: true,
                     filters: {
                         broker_id: brokerIdParam || 'all',
-                        trading_date: latestDate || startDate || 'all',
+                        trading_date: !isMultiDay ? (startDate || latestDate) : undefined,
+                        period: period || (startDate === endDate ? '1D' : `${startDate} to ${endDate}`),
                         start_date: startDate,
-                        end_date: endDate,
-                        period: startDate === endDate ? '1 day' : `${startDate} to ${endDate}`
+                        end_date: endDate
                     },
+                    summary: summaryTotals,
                     pagination: {
-                        total: totalRecords,
+                        total: totalCount,
                         page: pageNum,
                         limit: safeLimit,
-                        totalPages: Math.ceil(totalRecords / safeLimit) || (rows.length > 0 ? 1 : 0)
+                        totalPages: Math.ceil(totalCount / safeLimit) || (processedRows.length > 0 ? 1 : 0)
                     },
-                    data: formattedData
+                    data: processedRows
                 });
 
             } catch (error) {
