@@ -151,112 +151,73 @@ export default async function handler(req, res) {
 
         // ── Broker Summary (Daily Turnover) sub-route ──────────────────────────────
         if (route === 'broker-summary') {
-            console.log('[Broker Summary] ===== START =====');
-            console.log('[Broker Summary] Query params:', req.query);
-
             const { broker_id, start_date, end_date, limit, page } = req.query;
 
             try {
-                // ─── Step 1: Get the latest trading date ──────────────────────────────
-                console.log('[Broker Summary] Step 1: Getting latest trading date...');
-
+                // ─── Step 1: Get the latest date ──────────────────────────────────────
                 const { data: latestResult, error: latestError } = await supabase
                     .from('broker_daily_summary')
                     .select('trading_date')
                     .order('trading_date', { ascending: false })
                     .limit(1);
 
-                console.log('[Broker Summary] Latest date result:', latestResult);
-                console.log('[Broker Summary] Latest date error:', latestError);
-
                 if (latestError) {
                     console.error('[Broker Summary] Latest date error:', latestError);
-                    return res.status(500).json({
-                        success: false,
-                        error: 'Failed to fetch latest date',
-                        details: latestError.message
-                    });
+                    return res.status(500).json({ success: false, error: latestError.message });
                 }
 
                 if (!latestResult || latestResult.length === 0) {
-                    console.log('[Broker Summary] No data in broker_daily_summary table');
                     return res.status(200).json({
                         success: true,
                         message: 'No data found in broker_daily_summary',
-                        filters: { broker_id: broker_id || 'all' },
                         data: [],
                         pagination: { total: 0, page: 1, limit: 100, totalPages: 0 }
                     });
                 }
 
                 const latestDate = latestResult[0].trading_date;
-                console.log('[Broker Summary] Latest trading date:', latestDate);
-
-                // ─── Step 2: Use latest date for both start and end (single day) ──────
-                // If custom dates are provided, use them; otherwise use latest date
                 const endDate = end_date || latestDate;
-                const startDate = start_date || latestDate; // Default to latest date only
-
-                console.log('[Broker Summary] Start date:', startDate);
-                console.log('[Broker Summary] End date:', endDate);
-                console.log('[Broker Summary] Period:', startDate === endDate ? '1 day' : `${startDate} to ${endDate}`);
-
-                // ─── Step 3: Build and execute query ──────────────────────────────────
-                console.log('[Broker Summary] Step 3: Executing query...');
-
-                let q = supabase
-                    .from('broker_daily_summary')
-                    .select('broker_id, total_buy, total_sell, total_matching, total_turnover, trading_date')
-                    .gte('trading_date', startDate)
-                    .lte('trading_date', endDate);
-
-                if (broker_id) {
-                    const brokerIdInt = parseInt(broker_id, 10);
-                    if (!isNaN(brokerIdInt)) {
-                        q = q.eq('broker_id', brokerIdInt);
-                        console.log('[Broker Summary] Filtering by broker_id:', brokerIdInt);
-                    }
-                }
+                const startDate = start_date || latestDate;
 
                 const pageNum = parseInt(page || '1', 10);
                 const limitNum = parseInt(limit || '100', 10);
                 const safeLimit = Math.min(Math.max(limitNum, 1), 500);
                 const offset = (pageNum - 1) * safeLimit;
 
-                const { data, error, count } = await q
+                // ─── Step 2: Build query (like brokerHolding) ─────────────────────────
+                let query = supabase
+                    .from('broker_daily_summary')
+                    .select('*', { count: 'exact' })
+                    .gte('trading_date', startDate)
+                    .lte('trading_date', endDate)
                     .order('total_turnover', { ascending: false })
                     .range(offset, offset + safeLimit - 1);
 
-                console.log('[Broker Summary] Query result count:', data?.length || 0);
-                console.log('[Broker Summary] Query error:', error);
-                console.log('[Broker Summary] Count:', count);
+                if (broker_id) {
+                    const brokerIdInt = parseInt(broker_id, 10);
+                    if (!isNaN(brokerIdInt)) {
+                        query = query.eq('broker_id', brokerIdInt);
+                    }
+                }
+
+                const { data, error, count } = await query;
 
                 if (error) {
                     console.error('[Broker Summary] Query error:', error);
-                    return res.status(500).json({
-                        success: false,
-                        error: 'Query failed',
-                        details: error.message
-                    });
+                    return res.status(500).json({ success: false, error: error.message });
                 }
 
                 if (!data || data.length === 0) {
-                    console.log('[Broker Summary] No data for the selected date');
                     return res.status(200).json({
                         success: true,
                         message: 'No data found for the selected date',
-                        filters: {
-                            broker_id: broker_id || 'all',
-                            trading_date: latestDate
-                        },
+                        filters: { broker_id: broker_id || 'all', trading_date: latestDate },
                         data: [],
                         pagination: { total: 0, page: 1, limit: safeLimit, totalPages: 0 }
                     });
                 }
 
-                // ─── Step 4: Format response ───────────────────────────────────────────
-                console.log('[Broker Summary] Formatting response...');
-
+                // ─── Step 3: Format response ──────────────────────────────────────────
                 const formattedData = data.map(row => ({
                     broker_id: row.broker_id,
                     total_buy: Number(row.total_buy || 0),
@@ -265,11 +226,6 @@ export default async function handler(req, res) {
                     total_turnover: Number(row.total_turnover || 0),
                     trading_date: row.trading_date
                 }));
-
-                console.log('[Broker Summary] Formatted data count:', formattedData.length);
-
-                // ─── Step 5: Return response ───────────────────────────────────────────
-                console.log('[Broker Summary] ===== SUCCESS =====');
 
                 return res.status(200).json({
                     success: true,
@@ -284,21 +240,14 @@ export default async function handler(req, res) {
                         limit: safeLimit,
                         totalPages: Math.ceil((count || data.length) / safeLimit)
                     },
-                    data: formattedData,
-                    debug: {
-                        latest_date: latestDate,
-                        raw_data_count: data.length,
-                        period: 'last_trading_day'
-                    }
+                    data: formattedData
                 });
 
             } catch (error) {
-                console.error('[Broker Summary] ===== ERROR =====');
                 console.error('[Broker Summary] Error:', error);
                 return res.status(500).json({
                     success: false,
-                    error: 'Internal server error',
-                    details: error.message,
+                    error: error.message,
                     stack: error.stack
                 });
             }
