@@ -153,7 +153,7 @@ export default async function handler(req, res) {
         if (route === 'broker-summary') {
             const { broker_id, start_date, end_date, limit, page } = req.query;
 
-            // ─── Get the latest trading date from the database ────────────────────
+            // ─── Get latest date ──────────────────────────────────────────────────────
             let latestDateQuery = supabase
                 .from('broker_daily_summary')
                 .select('trading_date')
@@ -175,7 +175,7 @@ export default async function handler(req, res) {
                 const defaultEndDate = formatDate(now);
                 const defaultStartDate = formatDate(new Date(now.setMonth(now.getMonth() - 3)));
 
-                const response = {
+                return res.status(200).json({
                     success: true,
                     filters: {
                         broker_id: broker_id || 'all',
@@ -186,8 +186,7 @@ export default async function handler(req, res) {
                     pagination: { total: 0, page: 1, limit: 100, totalPages: 0 },
                     data: [],
                     message: 'No broker summary data found'
-                };
-                return res.status(200).json(response);
+                });
             }
 
             const latestDate = latestResult[0].trading_date;
@@ -208,41 +207,50 @@ export default async function handler(req, res) {
             const safeLimit = Math.min(Math.max(limitNum, 1), 500);
             const offset = (pageNum - 1) * safeLimit;
 
-            // ─── Call the RPC function ──────────────────────────────────────────────
-            const { data: rpcData, error: rpcError } = await supabase.rpc('get_broker_summary', {
-                p_broker_id: broker_id ? parseInt(broker_id, 10) : null,
-                p_start_date: startDate,
-                p_end_date: endDate,
-                p_limit: safeLimit,
-                p_offset: offset
-            });
+            // ─── FALLBACK: Direct query (skip RPC) ──────────────────────────────────
+            let q = supabase
+                .from('broker_daily_summary')
+                .select('broker_id, total_buy, total_sell, total_matching, total_turnover, trading_date')
+                .gte('trading_date', startDate)
+                .lte('trading_date', endDate);
 
-            // ─── DEBUG: Log the RPC response ────────────────────────────────────────
-            console.log('[Broker Summary] RPC Error:', rpcError);
-            console.log('[Broker Summary] RPC Data:', rpcData);
-            console.log('[Broker Summary] RPC Data length:', rpcData?.length);
-
-            if (rpcError) {
-                console.error('RPC Error:', rpcError);
-                return res.status(500).json({ error: rpcError.message });
+            if (broker_id) {
+                q = q.eq('broker_id', parseInt(broker_id, 10));
             }
 
-            // ─── Get total count for pagination ────────────────────────────────────
-            let totalCount = 0;
-            if (rpcData && rpcData.length > 0) {
-                // Get total count from RPC or fallback
-                const { count, error: countError } = await supabase
-                    .from('broker_daily_summary')
-                    .select('broker_id', { count: 'exact', head: true })
-                    .gte('trading_date', startDate)
-                    .lte('trading_date', endDate)
-                    .modify('broker_id', broker_id ? `eq.${broker_id}` : 'not.is.null');
+            const { data, error, count } = await q
+                .order('trading_date', { ascending: false })
+                .range(offset, offset + safeLimit - 1);
 
-                if (!countError) totalCount = count || 0;
+            if (error) {
+                return res.status(500).json({ error: error.message });
             }
+
+            // ─── Aggregate by broker_id ──────────────────────────────────────────────
+            const map = new Map();
+            for (const row of data || []) {
+                if (!map.has(row.broker_id)) {
+                    map.set(row.broker_id, {
+                        broker_id: row.broker_id,
+                        total_buy: 0,
+                        total_sell: 0,
+                        total_matching: 0,
+                        total_turnover: 0,
+                        trading_days: 0
+                    });
+                }
+                const agg = map.get(row.broker_id);
+                agg.total_buy += Number(row.total_buy || 0);
+                agg.total_sell += Number(row.total_sell || 0);
+                agg.total_matching += Number(row.total_matching || 0);
+                agg.total_turnover += Number(row.total_turnover || 0);
+                agg.trading_days += 1;
+            }
+
+            const summaryData = Array.from(map.values());
 
             // ─── Response ────────────────────────────────────────────────────────────
-            const response = {
+            return res.status(200).json({
                 success: true,
                 filters: {
                     broker_id: broker_id || 'all',
@@ -251,43 +259,20 @@ export default async function handler(req, res) {
                     period: '3 months (from latest trading date)'
                 },
                 pagination: {
-                    total: totalCount || rpcData?.length || 0,
+                    total: summaryData.length,
                     page: pageNum,
                     limit: safeLimit,
-                    totalPages: Math.ceil((totalCount || rpcData?.length || 0) / safeLimit)
+                    totalPages: Math.ceil(summaryData.length / safeLimit)
                 },
-                data: (rpcData || []).map(row => ({
+                data: summaryData.map(row => ({
                     broker_id: row.broker_id,
                     total_buy: Number(row.total_buy || 0),
                     total_sell: Number(row.total_sell || 0),
                     total_matching: Number(row.total_matching || 0),
                     total_turnover: Number(row.total_turnover || 0),
                     trading_days: row.trading_days || 0,
-                    avg_daily_turnover: Number(row.avg_daily_turnover || 0)
+                    avg_daily_turnover: row.total_turnover / row.trading_days || 0
                 }))
-            };
-
-            if (!rpcData || rpcData.length === 0) {
-                response.message = 'No broker summary data found for the given period';
-            }
-
-            return res.status(200).json(response);
-        }
-
-        if (route === 'test-rpc') {
-            const { data, error } = await supabase.rpc('get_broker_summary', {
-                p_broker_id: null,
-                p_start_date: '2026-05-27',
-                p_end_date: '2026-08-27',
-                p_limit: 100,
-                p_offset: 0
-            });
-
-            return res.status(200).json({
-                success: true,
-                rpc_error: error,
-                rpc_data: data,
-                data_length: data?.length
             });
         }
 
