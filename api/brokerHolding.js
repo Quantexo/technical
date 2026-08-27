@@ -154,10 +154,29 @@ export default async function handler(req, res) {
             const { broker_id, start_date, end_date, limit, page } = req.query;
 
             try {
-                console.log('[Broker Summary] Starting...');
+                console.log('[Broker Summary] ===== START =====');
+                console.log('[Broker Summary] Using SUPABASE_URL_2');
 
-                // ─── Step 1: Get the latest date ──────────────────────────────────────
-                console.log('[Broker Summary] Fetching latest date...');
+                // ─── Step 1: Check if table has any data ─────────────────────────────
+                const { count: totalCount, error: countError } = await supabase
+                    .from('broker_daily_summary')
+                    .select('*', { count: 'exact', head: true });
+
+                console.log('[Broker Summary] Total rows in table:', totalCount);
+                if (countError) {
+                    console.error('[Broker Summary] Count error:', countError);
+                }
+
+                if (totalCount === 0) {
+                    return res.status(200).json({
+                        success: true,
+                        message: 'broker_daily_summary table is empty',
+                        data: [],
+                        pagination: { total: 0, page: 1, limit: 100, totalPages: 0 }
+                    });
+                }
+
+                // ─── Step 2: Get the latest date ──────────────────────────────────────
                 const { data: latestResult, error: latestError } = await supabase
                     .from('broker_daily_summary')
                     .select('trading_date')
@@ -166,15 +185,10 @@ export default async function handler(req, res) {
 
                 if (latestError) {
                     console.error('[Broker Summary] Latest date error:', latestError);
-                    return res.status(500).json({
-                        success: false,
-                        error: latestError.message,
-                        details: 'Failed to fetch latest date'
-                    });
+                    return res.status(500).json({ success: false, error: latestError.message });
                 }
 
                 if (!latestResult || latestResult.length === 0) {
-                    console.log('[Broker Summary] No data in broker_daily_summary');
                     return res.status(200).json({
                         success: true,
                         message: 'No data found in broker_daily_summary',
@@ -184,9 +198,9 @@ export default async function handler(req, res) {
                 }
 
                 const latestDate = latestResult[0].trading_date;
-                console.log('[Broker Summary] Latest date:', latestDate);
+                console.log('[Broker Summary] Latest trading date:', latestDate);
 
-                // ─── Step 2: Build date range ─────────────────────────────────────────
+                // ─── Step 3: Build date range ─────────────────────────────────────────
                 const endDate = end_date || latestDate;
                 const startDate = start_date || latestDate;
 
@@ -198,13 +212,14 @@ export default async function handler(req, res) {
                 const safeLimit = Math.min(Math.max(limitNum, 1), 500);
                 const offset = (pageNum - 1) * safeLimit;
 
-                // ─── Step 3: Build query (exact same pattern as brokerHolding) ────────
-                console.log('[Broker Summary] Executing query...');
+                // ─── Step 4: Build query ──────────────────────────────────────────────
                 let query = supabase
                     .from('broker_daily_summary')
-                    .select('*', { count: 'exact' })
-                    .gte('trading_date', startDate)
-                    .lte('trading_date', endDate);
+                    .select('*', { count: 'exact' });
+
+                // Date filter - use the correct column name
+                query = query.gte('trading_date', startDate);
+                query = query.lte('trading_date', endDate);
 
                 if (broker_id) {
                     const brokerIdInt = parseInt(broker_id, 10);
@@ -214,7 +229,7 @@ export default async function handler(req, res) {
                     }
                 }
 
-                // ─── Step 4: Apply sorting and pagination ─────────────────────────────
+                // ─── Step 5: Execute query ─────────────────────────────────────────────
                 const { data, error, count } = await query
                     .order('total_turnover', { ascending: false })
                     .range(offset, offset + safeLimit - 1);
@@ -228,7 +243,7 @@ export default async function handler(req, res) {
                     });
                 }
 
-                console.log('[Broker Summary] Data count:', data?.length || 0);
+                console.log('[Broker Summary] Query returned:', data?.length || 0, 'rows');
                 console.log('[Broker Summary] Total count:', count || 0);
 
                 if (!data || data.length === 0) {
@@ -242,11 +257,17 @@ export default async function handler(req, res) {
                             end_date: endDate
                         },
                         data: [],
-                        pagination: { total: 0, page: 1, limit: safeLimit, totalPages: 0 }
+                        pagination: { total: 0, page: 1, limit: safeLimit, totalPages: 0 },
+                        debug: {
+                            total_rows_in_table: totalCount,
+                            latest_date: latestDate,
+                            start_date: startDate,
+                            end_date: endDate
+                        }
                     });
                 }
 
-                // ─── Step 5: Format response ──────────────────────────────────────────
+                // ─── Step 6: Format response ──────────────────────────────────────────
                 const formattedData = data.map(row => ({
                     broker_id: row.broker_id,
                     total_buy: Number(row.total_buy || 0),
@@ -273,6 +294,7 @@ export default async function handler(req, res) {
                     },
                     data: formattedData,
                     debug: {
+                        total_rows_in_table: totalCount,
                         latest_date: latestDate,
                         start_date: startDate,
                         end_date: endDate,
