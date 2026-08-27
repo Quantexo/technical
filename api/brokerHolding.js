@@ -1,19 +1,17 @@
 // api/brokerHolding.js — self-contained (PostgreSQL RPC + PostgREST fallback)
 import { createClient } from '@supabase/supabase-js';
 
-// ─── Supabase client — Broker Holdings DB ─
-const supabaseUrl = process.env.SUPABASE_URL_2;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY_2 || process.env.SUPABASE_ANON_KEY_2 || process.env.SUPABASE_KEY_2;
-if (!supabaseUrl || !supabaseKey) {
-    throw new Error('Missing SUPABASE_URL_2 or SUPABASE_SERVICE_ROLE_KEY_2 environment variables');
-}
-const supabase = createClient(supabaseUrl, supabaseKey);
+// ─── Supabase client — Broker Holdings DB (DB 2) ─
+const supabaseUrl2 = process.env.SUPABASE_URL_2 || process.env.SUPABASE_URL;
+const supabaseKey2 = process.env.SUPABASE_SERVICE_ROLE_KEY_2 || process.env.SUPABASE_ANON_KEY_2 || process.env.SUPABASE_KEY_2 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
 
-// ─── Supabase client — Main DB (for brokers list) ─
-const supabaseMain = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supabase = (supabaseUrl2 && supabaseKey2) ? createClient(supabaseUrl2, supabaseKey2) : null;
+
+// ─── Supabase client — Main DB (for brokers list & general tables) ─
+const supabaseMainUrl = process.env.SUPABASE_URL || process.env.SUPABASE_URL_2;
+const supabaseMainKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY_2 || process.env.SUPABASE_ANON_KEY_2 || process.env.SUPABASE_KEY_2;
+
+const supabaseMain = (supabaseMainUrl && supabaseMainKey) ? createClient(supabaseMainUrl, supabaseMainKey) : supabase;
 
 // ─── Date helpers ────────────────────────────────────────────────────────────
 function addDays(date, days) {
@@ -151,125 +149,124 @@ export default async function handler(req, res) {
 
         // ── Broker Summary (Daily Turnover) sub-route ──────────────────────────────
         if (route === 'broker-summary') {
-            const { broker_id, start_date, end_date, limit, page } = req.query;
+            const { broker_id, memberId, start_date, end_date, date, trading_date, limit, page, sort_by, sort_order } = req.query;
 
             try {
-                console.log('[Broker Summary] ===== START =====');
-                console.log('[Broker Summary] Using SUPABASE_URL_2');
-
-                // ─── Step 1: Check if table has any data ─────────────────────────────
-                const { count: totalCount, error: countError } = await supabase
-                    .from('broker_daily_summary')
-                    .select('*', { count: 'exact', head: true });
-
-                console.log('[Broker Summary] Total rows in table:', totalCount);
-                if (countError) {
-                    console.error('[Broker Summary] Count error:', countError);
+                const clients = [supabase, supabaseMain].filter(Boolean);
+                if (clients.length === 0) {
+                    return res.status(500).json({ success: false, error: 'Database client not initialized' });
                 }
 
-                if (totalCount === 0) {
-                    return res.status(200).json({
-                        success: true,
-                        message: 'broker_daily_summary table is empty',
-                        data: [],
-                        pagination: { total: 0, page: 1, limit: 100, totalPages: 0 }
-                    });
+                // ─── Step 1: Detect which client contains broker_daily_summary and find latest date ─
+                let activeClient = null;
+                let latestDate = date || trading_date || end_date;
+
+                for (const client of clients) {
+                    try {
+                        const { data, error } = await client
+                            .from('broker_daily_summary')
+                            .select('trading_date')
+                            .order('trading_date', { ascending: false })
+                            .limit(1);
+
+                        if (!error && data && data.length > 0) {
+                            activeClient = client;
+                            if (!latestDate) {
+                                latestDate = data[0].trading_date;
+                            }
+                            break;
+                        }
+                    } catch (_) {}
                 }
 
-                // ─── Step 2: Get the latest date ──────────────────────────────────────
-                const { data: latestResult, error: latestError } = await supabase
-                    .from('broker_daily_summary')
-                    .select('trading_date')
-                    .order('trading_date', { ascending: false })
-                    .limit(1);
-
-                if (latestError) {
-                    console.error('[Broker Summary] Latest date error:', latestError);
-                    return res.status(500).json({ success: false, error: latestError.message });
+                if (!activeClient) {
+                    activeClient = clients[0];
                 }
 
-                if (!latestResult || latestResult.length === 0) {
-                    return res.status(200).json({
-                        success: true,
-                        message: 'No data found in broker_daily_summary',
-                        data: [],
-                        pagination: { total: 0, page: 1, limit: 100, totalPages: 0 }
-                    });
-                }
-
-                const latestDate = latestResult[0].trading_date;
-                console.log('[Broker Summary] Latest trading date:', latestDate);
-
-                // ─── Step 3: Build date range ─────────────────────────────────────────
-                const endDate = end_date || latestDate;
-                const startDate = start_date || latestDate;
-
-                console.log('[Broker Summary] Start date:', startDate);
-                console.log('[Broker Summary] End date:', endDate);
+                // ─── Step 2: Build date range ─────────────────────────────────────────
+                const targetSingleDate = date || trading_date;
+                const startDate = targetSingleDate || start_date || latestDate;
+                const endDate = targetSingleDate || end_date || latestDate;
 
                 const pageNum = parseInt(page || '1', 10);
                 const limitNum = parseInt(limit || '100', 10);
                 const safeLimit = Math.min(Math.max(limitNum, 1), 500);
                 const offset = (pageNum - 1) * safeLimit;
+                const brokerIdParam = broker_id || memberId;
+                const sortByCol = ['total_turnover', 'total_buy', 'total_sell', 'total_matching', 'broker_id', 'trading_date'].includes(sort_by)
+                    ? sort_by
+                    : 'total_turnover';
+                const isAsc = sort_order === 'asc';
 
-                // ─── Step 4: Build query ──────────────────────────────────────────────
-                let query = supabase
-                    .from('broker_daily_summary')
-                    .select('*', { count: 'exact' });
+                // ─── Step 3: Query rows across clients ───────────────────────────────
+                let data = null;
+                let count = null;
+                let queryError = null;
 
-                // Date filter - use the correct column name
-                query = query.gte('trading_date', startDate);
-                query = query.lte('trading_date', endDate);
+                for (const client of [activeClient, ...clients.filter(c => c !== activeClient)]) {
+                    try {
+                        let query = client
+                            .from('broker_daily_summary')
+                            .select('*', { count: 'exact' });
 
-                if (broker_id) {
-                    const brokerIdInt = parseInt(broker_id, 10);
-                    if (!isNaN(brokerIdInt)) {
-                        query = query.eq('broker_id', brokerIdInt);
-                        console.log('[Broker Summary] Filtering by broker_id:', brokerIdInt);
+                        if (startDate) query = query.gte('trading_date', startDate);
+                        if (endDate) query = query.lte('trading_date', endDate);
+
+                        if (brokerIdParam) {
+                            const bId = parseInt(brokerIdParam, 10);
+                            if (!isNaN(bId)) {
+                                query = query.eq('broker_id', bId);
+                            }
+                        }
+
+                        const res = await query
+                            .order(sortByCol, { ascending: isAsc })
+                            .range(offset, offset + safeLimit - 1);
+
+                        if (!res.error && res.data) {
+                            data = res.data;
+                            count = res.count;
+                            queryError = null;
+                            if (data.length > 0) break;
+                        } else if (res.error) {
+                            queryError = res.error;
+                        }
+                    } catch (err) {
+                        queryError = err;
                     }
                 }
 
-                // ─── Step 5: Execute query ─────────────────────────────────────────────
-                const { data, error, count } = await query
-                    .order('total_turnover', { ascending: false })
-                    .range(offset, offset + safeLimit - 1);
-
-                if (error) {
-                    console.error('[Broker Summary] Query error:', error);
+                if (queryError && (!data || data.length === 0)) {
+                    console.error('[Broker Summary] Query error:', queryError);
                     return res.status(500).json({
                         success: false,
-                        error: error.message,
-                        details: 'Query execution failed'
+                        error: queryError.message || 'Query execution failed'
                     });
                 }
 
-                console.log('[Broker Summary] Query returned:', data?.length || 0, 'rows');
-                console.log('[Broker Summary] Total count:', count || 0);
-
-                if (!data || data.length === 0) {
-                    return res.status(200).json({
-                        success: true,
-                        message: 'No data found for the selected date',
-                        filters: {
-                            broker_id: broker_id || 'all',
-                            trading_date: latestDate,
-                            start_date: startDate,
-                            end_date: endDate
-                        },
-                        data: [],
-                        pagination: { total: 0, page: 1, limit: safeLimit, totalPages: 0 },
-                        debug: {
-                            total_rows_in_table: totalCount,
-                            latest_date: latestDate,
-                            start_date: startDate,
-                            end_date: endDate
+                // ─── Step 4: Map broker names from brokers table if available ──────────
+                let brokerNameMap = {};
+                try {
+                    const brokerClient = supabaseMain || supabase;
+                    if (brokerClient) {
+                        const { data: bList } = await brokerClient
+                            .from('brokers')
+                            .select('broker_id, broker_name');
+                        if (bList && bList.length > 0) {
+                            bList.forEach(b => {
+                                brokerNameMap[b.broker_id] = b.broker_name;
+                            });
                         }
-                    });
-                }
+                    }
+                } catch (_) {}
 
-                // ─── Step 6: Format response ──────────────────────────────────────────
-                const formattedData = data.map(row => ({
+                // ─── Step 5: Format response ──────────────────────────────────────────
+                const rows = data || [];
+                const totalRecords = count !== null && count !== undefined ? count : rows.length;
+
+                const formattedData = rows.map(row => ({
                     broker_id: row.broker_id,
+                    broker_name: brokerNameMap[row.broker_id] || `Broker ${row.broker_id}`,
                     total_buy: Number(row.total_buy || 0),
                     total_sell: Number(row.total_sell || 0),
                     total_matching: Number(row.total_matching || 0),
@@ -277,30 +274,22 @@ export default async function handler(req, res) {
                     trading_date: row.trading_date
                 }));
 
-                console.log('[Broker Summary] Returning', formattedData.length, 'rows');
-
                 return res.status(200).json({
                     success: true,
                     filters: {
-                        broker_id: broker_id || 'all',
-                        trading_date: latestDate,
+                        broker_id: brokerIdParam || 'all',
+                        trading_date: latestDate || startDate || 'all',
+                        start_date: startDate,
+                        end_date: endDate,
                         period: startDate === endDate ? '1 day' : `${startDate} to ${endDate}`
                     },
                     pagination: {
-                        total: count || data.length,
+                        total: totalRecords,
                         page: pageNum,
                         limit: safeLimit,
-                        totalPages: Math.ceil((count || data.length) / safeLimit)
+                        totalPages: Math.ceil(totalRecords / safeLimit) || (rows.length > 0 ? 1 : 0)
                     },
-                    data: formattedData,
-                    debug: {
-                        total_rows_in_table: totalCount,
-                        latest_date: latestDate,
-                        start_date: startDate,
-                        end_date: endDate,
-                        raw_count: data.length,
-                        total_count: count || data.length
-                    }
+                    data: formattedData
                 });
 
             } catch (error) {
@@ -317,8 +306,8 @@ export default async function handler(req, res) {
         let dataType = 'holding';    // default
         if (route === 'buy') dataType = 'buy';
         if (route === 'sell') dataType = 'sell';
-        if (route && !['buy', 'sell', 'brokers'].includes(route)) {
-            return res.status(400).json({ error: 'Invalid route. Use buy, sell, or holding (default)' });
+        if (route && !['buy', 'sell', 'brokers', 'broker-summary'].includes(route)) {
+            return res.status(400).json({ error: 'Invalid route. Use buy, sell, broker-summary, or holding (default)' });
         }
 
         if (!date && !period) {
