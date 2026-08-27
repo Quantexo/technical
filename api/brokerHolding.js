@@ -217,6 +217,11 @@ export default async function handler(req, res) {
                 p_offset: offset
             });
 
+            // ─── DEBUG: Log the RPC response ────────────────────────────────────────
+            console.log('[Broker Summary] RPC Error:', rpcError);
+            console.log('[Broker Summary] RPC Data:', rpcData);
+            console.log('[Broker Summary] RPC Data length:', rpcData?.length);
+
             if (rpcError) {
                 console.error('RPC Error:', rpcError);
                 return res.status(500).json({ error: rpcError.message });
@@ -267,6 +272,23 @@ export default async function handler(req, res) {
             }
 
             return res.status(200).json(response);
+        }
+
+        if (route === 'test-rpc') {
+            const { data, error } = await supabase.rpc('get_broker_summary', {
+                p_broker_id: null,
+                p_start_date: '2026-05-27',
+                p_end_date: '2026-08-27',
+                p_limit: 100,
+                p_offset: 0
+            });
+
+            return res.status(200).json({
+                success: true,
+                rpc_error: error,
+                rpc_data: data,
+                data_length: data?.length
+            });
         }
 
         // ── Determine data type (route) ──────────────────────────────────────
