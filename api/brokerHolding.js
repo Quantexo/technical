@@ -29,6 +29,12 @@ function formatDate(date) {
     return `${year}-${month}-${day}`;
 }
 
+function getThreeMonthsAgo() {
+    const date = new Date();
+    date.setMonth(date.getMonth() - 3);
+    return formatDate(date);
+}
+
 // ─── Get distinct trading dates ─────────────────────────────────────────────
 async function getDistinctTradingDates({ symbol, broker_id } = {}) {
     try {
@@ -40,7 +46,7 @@ async function getDistinctTradingDates({ symbol, broker_id } = {}) {
         if (!error && data && data.length > 0) {
             return data.map(r => (typeof r === 'string' ? r : r.date));
         }
-    } catch (_) {}
+    } catch (_) { }
 
     // Fallback mode: query top 200 rows to extract distinct dates instantly
     let q = supabase
@@ -101,10 +107,10 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
             break;
         }
 
-        case '1M':  startDate = formatDate(addDays(maxDate, -30));  break;
-        case '3M':  startDate = formatDate(addDays(maxDate, -90));  break;
-        case '6M':  startDate = formatDate(addDays(maxDate, -180)); break;
-        default:    throw new Error(`Invalid period: ${period}`);
+        case '1M': startDate = formatDate(addDays(maxDate, -30)); break;
+        case '3M': startDate = formatDate(addDays(maxDate, -90)); break;
+        case '6M': startDate = formatDate(addDays(maxDate, -180)); break;
+        default: throw new Error(`Invalid period: ${period}`);
     }
 
     return { startDate, endDate };
@@ -114,10 +120,10 @@ async function buildDateRange({ date: specificDate, period, symbol, broker_id })
 export default async function handler(req, res) {
     const origin = req.headers.origin;
     if (origin) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
     } else {
-      res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Origin', '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
     res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
@@ -143,9 +149,172 @@ export default async function handler(req, res) {
             return res.status(200).json({ success: true, count: data.length, brokers: data });
         }
 
+        // ── Broker Summary (Daily Turnover) sub-route ────────────────────────
+        if (route === 'broker-summary') {
+            const { broker_id, start_date, end_date, limit, page } = req.query;
+
+            let latestDateQuery = supabase
+                .from('broker_daily_summary')
+                .select('trading_date')
+                .order('trading_date', { ascending: false })
+                .limit(1);
+
+            if (broker_id) {
+                latestDateQuery = latestDateQuery.eq('broker_id', parseInt(broker_id, 10));
+            }
+
+            const { data: latestResult, error: latestError } = await latestDateQuery;
+
+            if (latestError) {
+                throw new Error(`Failed to fetch latest date: ${latestError.message}`);
+            }
+
+            if (!latestResult || latestResult.length === 0) {
+                // Fallback: use today's date if no data exists
+                const now = new Date();
+                const defaultEndDate = formatDate(now);
+                const defaultStartDate = formatDate(new Date(now.setMonth(now.getMonth() - 3)));
+                const response = {
+                    success: true,
+                    filters: {
+                        broker_id: broker_id || 'all',
+                        start_date: defaultStartDate,
+                        end_date: defaultEndDate,
+                        period: '3 months'
+                    },
+                    pagination: { total: 0, page: 1, limit: 100, totalPages: 0 },
+                    data: [],
+                    message: 'No broker summary data found'
+                };
+                return res.status(200).json(response);
+
+            }
+
+            const latestDate = latestResult[0].trading_date;
+
+            // ─── Use latest date as end date ──────────────────────────────────────
+            const endDate = end_date || latestDate;
+
+            // ─── Calculate start date: 3 months before the latest date ───────────
+            let startDate;
+            if (start_date) {
+                startDate = start_date;
+            } else {
+                const latestDateObj = new Date(latestDate + 'T00:00:00Z');
+                const threeMonthsAgo = new Date(latestDateObj);
+                threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+                startDate = formatDate(threeMonthsAgo);
+            }
+
+            const pageNum = parseInt(page || '1', 10);
+            const limitNum = parseInt(limit || '100', 10);
+            const safeLimit = Math.min(Math.max(limitNum, 1), 500);
+            const offset = (pageNum - 1) * safeLimit;
+
+            // ── Try RPC function first ──────────────────────────────────────────────
+            let query = supabase.rpc('get_broker_summary', {
+                p_broker_id: broker_id ? parseInt(broker_id, 10) : null,
+                p_start_date: startDate,
+                p_end_date: endDate,
+                p_limit: safeLimit,
+                p_offset: offset
+            });
+
+            const { data: rpcData, error: rpcError } = await query;
+
+            let summaryData = [];
+            let totalCount = 0;
+
+            if (!rpcError && rpcData) {
+                summaryData = rpcData;
+                // Get total count
+                const { count, error: countError } = await supabase
+                    .from('broker_daily_summary')
+                    .select('broker_id', { count: 'exact', head: true })
+                    .gte('trading_date', startDate)
+                    .lte('trading_date', endDate)
+                    .modify('broker_id', broker_id ? `eq.${broker_id}` : 'not.is.null');
+
+                if (!countError) totalCount = count || 0;
+            } else {
+                // ── Fallback: Direct query ──────────────────────────────────────────
+                console.warn('RPC function error, using fallback query:', rpcError?.message);
+
+                let q = supabase
+                    .from('broker_daily_summary')
+                    .select('broker_id, total_buy, total_sell, total_matching, total_turnover, trading_date')
+                    .gte('trading_date', startDate)
+                    .lte('trading_date', endDate);
+
+                if (broker_id) q = q.eq('broker_id', parseInt(broker_id, 10));
+
+                const { data, error, count } = await q
+                    .order('total_turnover', { ascending: false })
+                    .range(offset, offset + safeLimit - 1);
+
+                if (error) throw new Error(`Query failed: ${error.message}`);
+
+                // Aggregate by broker_id
+                const map = new Map();
+                for (const row of data || []) {
+                    if (!map.has(row.broker_id)) {
+                        map.set(row.broker_id, {
+                            broker_id: row.broker_id,
+                            total_buy: 0,
+                            total_sell: 0,
+                            total_matching: 0,
+                            total_turnover: 0,
+                            trading_days: 0
+                        });
+                    }
+                    const agg = map.get(row.broker_id);
+                    agg.total_buy += Number(row.total_buy || 0);
+                    agg.total_sell += Number(row.total_sell || 0);
+                    agg.total_matching += Number(row.total_matching || 0);
+                    agg.total_turnover += Number(row.total_turnover || 0);
+                    agg.trading_days += 1;
+                }
+
+                summaryData = Array.from(map.values());
+                totalCount = count || summaryData.length;
+            }
+
+            // ─── Response ────────────────────────────────────────────────────────────
+            const response = {
+                success: true,
+                filters: {
+                    broker_id: broker_id || 'all',
+                    start_date: startDate,
+                    end_date: endDate,
+                    period: '3 months (from latest trading date)'
+                },
+                pagination: {
+                    total: totalCount,
+                    page: pageNum,
+                    limit: safeLimit,
+                    totalPages: Math.ceil(totalCount / safeLimit)
+                },
+                data: summaryData.map(row => ({
+                    broker_id: row.broker_id,
+                    total_buy: Number(row.total_buy || 0),
+                    total_sell: Number(row.total_sell || 0),
+                    total_matching: Number(row.total_matching || 0),
+                    total_turnover: Number(row.total_turnover || 0),
+                    trading_days: row.trading_days || 0,
+                    avg_daily_turnover: row.avg_daily_turnover || 0
+                }))
+            };
+
+            if (summaryData.length === 0) {
+                response.message = 'No broker summary data found for the given period';
+            }
+
+            return res.status(200).json(response);
+        }
+
         // ── Determine data type (route) ──────────────────────────────────────
         let dataType = 'holding';    // default
-        if (route === 'buy')  dataType = 'buy';
+        if (route === 'buy') dataType = 'buy';
         if (route === 'sell') dataType = 'sell';
         if (route && !['buy', 'sell', 'brokers'].includes(route)) {
             return res.status(400).json({ error: 'Invalid route. Use buy, sell, or holding (default)' });
@@ -176,7 +345,7 @@ export default async function handler(req, res) {
         // ── Date range calculation ─────────────────────────────────────────
         const { startDate, endDate } = await buildDateRange({ date, period, symbol, broker_id });
 
-        const pageNum  = parseInt(page  || '1',   10);
+        const pageNum = parseInt(page || '1', 10);
         const limitNum = parseInt(limit || '500', 10);
         const safeLimit = Math.min(Math.max(limitNum, 1), 1000);
         const offset = (pageNum - 1) * safeLimit;
@@ -213,9 +382,9 @@ export default async function handler(req, res) {
             const isMultiDay = startDate !== endDate;
 
             // Always fetch raw rows — PostgREST does NOT support aggregate functions
-            const selectStr = dataType === 'buy'  ? 'date, symbol, broker_id, buy_qty, buy_amount' :
-                              dataType === 'sell' ? 'date, symbol, broker_id, sell_qty, sell_amount' :
-                                                    'date, symbol, broker_id, holding_qty, holding_amount';
+            const selectStr = dataType === 'buy' ? 'date, symbol, broker_id, buy_qty, buy_amount' :
+                dataType === 'sell' ? 'date, symbol, broker_id, sell_qty, sell_amount' :
+                    'date, symbol, broker_id, holding_qty, holding_amount';
 
             // For multi-day ranges, fetch up to 5000 raw rows then aggregate in JS
             const fetchLimit = isMultiDay ? 5000 : safeLimit;
@@ -230,7 +399,7 @@ export default async function handler(req, res) {
 
             if (symbol) query = query.eq('symbol', symbol);
             if (broker_id) query = query.eq('broker_id', broker_id);
-            if (dataType === 'holding' && type === 'Buy')  query = query.gt('holding_qty', 0);
+            if (dataType === 'holding' && type === 'Buy') query = query.gt('holding_qty', 0);
             if (dataType === 'holding' && type === 'Sell') query = query.lt('holding_qty', 0);
 
             // For single-day queries, sort at DB level; for multi-day we sort after aggregation
@@ -247,7 +416,7 @@ export default async function handler(req, res) {
 
             if (isMultiDay) {
                 // ── JS-side aggregation: group by (symbol, broker_id) ──────────
-                const qtyKey    = dataType === 'buy' ? 'buy_qty'    : dataType === 'sell' ? 'sell_qty'    : 'holding_qty';
+                const qtyKey = dataType === 'buy' ? 'buy_qty' : dataType === 'sell' ? 'sell_qty' : 'holding_qty';
                 const amountKey = dataType === 'buy' ? 'buy_amount' : dataType === 'sell' ? 'sell_amount' : 'holding_amount';
 
                 const map = new Map();
@@ -257,7 +426,7 @@ export default async function handler(req, res) {
                         map.set(key, { symbol: row.symbol, broker_id: row.broker_id, [qtyKey]: 0, [amountKey]: 0 });
                     }
                     const agg = map.get(key);
-                    agg[qtyKey]    += Number(row[qtyKey]    || 0);
+                    agg[qtyKey] += Number(row[qtyKey] || 0);
                     agg[amountKey] += Number(row[amountKey] || 0);
                 }
 
@@ -269,7 +438,7 @@ export default async function handler(req, res) {
                 aggregated.sort((a, b) => sortDir * ((a[sortKey] || 0) - (b[sortKey] || 0)));
 
                 // Re-apply type filter on net aggregated value (positive / negative)
-                if (dataType === 'holding' && type === 'Buy')  aggregated = aggregated.filter(r => r[qtyKey] > 0);
+                if (dataType === 'holding' && type === 'Buy') aggregated = aggregated.filter(r => r[qtyKey] > 0);
                 if (dataType === 'holding' && type === 'Sell') aggregated = aggregated.filter(r => r[qtyKey] < 0);
 
                 // Manual pagination on the aggregated result
@@ -291,8 +460,8 @@ export default async function handler(req, res) {
         // For multi-day aggregated fallback, 'date' is not part of the response
         const isAggregatedFallback = !rpcData && startDate !== endDate;
         const fieldMap = {
-            buy:     isAggregatedFallback ? ['symbol', 'broker_id', 'buy_qty', 'buy_amount']    : ['date', 'symbol', 'broker_id', 'buy_qty', 'buy_amount'],
-            sell:    isAggregatedFallback ? ['symbol', 'broker_id', 'sell_qty', 'sell_amount']  : ['date', 'symbol', 'broker_id', 'sell_qty', 'sell_amount'],
+            buy: isAggregatedFallback ? ['symbol', 'broker_id', 'buy_qty', 'buy_amount'] : ['date', 'symbol', 'broker_id', 'buy_qty', 'buy_amount'],
+            sell: isAggregatedFallback ? ['symbol', 'broker_id', 'sell_qty', 'sell_amount'] : ['date', 'symbol', 'broker_id', 'sell_qty', 'sell_amount'],
             holding: isAggregatedFallback ? ['symbol', 'broker_id', 'holding_qty', 'holding_amount'] : ['date', 'symbol', 'broker_id', 'holding_qty', 'holding_amount'],
         };
         const allowedFields = fieldMap[dataType];
@@ -319,9 +488,9 @@ export default async function handler(req, res) {
         const response = {
             success: true,
             filters: {
-                ...(date     && { date }),
-                ...(period   && { period }),
-                ...(symbol   && { symbol }),
+                ...(date && { date }),
+                ...(period && { period }),
+                ...(symbol && { symbol }),
                 ...(broker_id !== null && { memberId: broker_id }),
                 ...(type && dataType === 'holding' && { type }),
                 route: dataType,
@@ -332,9 +501,9 @@ export default async function handler(req, res) {
             ...(symbolSummary && symbolSummary.length > 0 && { symbolSummary }),
             ...(brokerSummary && brokerSummary.length > 0 && { brokerSummary }),
             pagination: {
-                total:      totalRecords,
-                page:       pageNum,
-                limit:      safeLimit,
+                total: totalRecords,
+                page: pageNum,
+                limit: safeLimit,
                 totalPages: Math.ceil(totalRecords / safeLimit),
             },
             data: mappedRows,
