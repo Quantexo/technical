@@ -154,7 +154,10 @@ export default async function handler(req, res) {
             const { broker_id, start_date, end_date, limit, page } = req.query;
 
             try {
+                console.log('[Broker Summary] Starting...');
+
                 // ─── Step 1: Get the latest date ──────────────────────────────────────
+                console.log('[Broker Summary] Fetching latest date...');
                 const { data: latestResult, error: latestError } = await supabase
                     .from('broker_daily_summary')
                     .select('trading_date')
@@ -163,10 +166,15 @@ export default async function handler(req, res) {
 
                 if (latestError) {
                     console.error('[Broker Summary] Latest date error:', latestError);
-                    return res.status(500).json({ success: false, error: latestError.message });
+                    return res.status(500).json({
+                        success: false,
+                        error: latestError.message,
+                        details: 'Failed to fetch latest date'
+                    });
                 }
 
                 if (!latestResult || latestResult.length === 0) {
+                    console.log('[Broker Summary] No data in broker_daily_summary');
                     return res.status(200).json({
                         success: true,
                         message: 'No data found in broker_daily_summary',
@@ -176,48 +184,69 @@ export default async function handler(req, res) {
                 }
 
                 const latestDate = latestResult[0].trading_date;
+                console.log('[Broker Summary] Latest date:', latestDate);
+
+                // ─── Step 2: Build date range ─────────────────────────────────────────
                 const endDate = end_date || latestDate;
                 const startDate = start_date || latestDate;
+
+                console.log('[Broker Summary] Start date:', startDate);
+                console.log('[Broker Summary] End date:', endDate);
 
                 const pageNum = parseInt(page || '1', 10);
                 const limitNum = parseInt(limit || '100', 10);
                 const safeLimit = Math.min(Math.max(limitNum, 1), 500);
                 const offset = (pageNum - 1) * safeLimit;
 
-                // ─── Step 2: Build query (like brokerHolding) ─────────────────────────
+                // ─── Step 3: Build query (exact same pattern as brokerHolding) ────────
+                console.log('[Broker Summary] Executing query...');
                 let query = supabase
                     .from('broker_daily_summary')
                     .select('*', { count: 'exact' })
                     .gte('trading_date', startDate)
-                    .lte('trading_date', endDate)
-                    .order('total_turnover', { ascending: false })
-                    .range(offset, offset + safeLimit - 1);
+                    .lte('trading_date', endDate);
 
                 if (broker_id) {
                     const brokerIdInt = parseInt(broker_id, 10);
                     if (!isNaN(brokerIdInt)) {
                         query = query.eq('broker_id', brokerIdInt);
+                        console.log('[Broker Summary] Filtering by broker_id:', brokerIdInt);
                     }
                 }
 
-                const { data, error, count } = await query;
+                // ─── Step 4: Apply sorting and pagination ─────────────────────────────
+                const { data, error, count } = await query
+                    .order('total_turnover', { ascending: false })
+                    .range(offset, offset + safeLimit - 1);
 
                 if (error) {
                     console.error('[Broker Summary] Query error:', error);
-                    return res.status(500).json({ success: false, error: error.message });
+                    return res.status(500).json({
+                        success: false,
+                        error: error.message,
+                        details: 'Query execution failed'
+                    });
                 }
+
+                console.log('[Broker Summary] Data count:', data?.length || 0);
+                console.log('[Broker Summary] Total count:', count || 0);
 
                 if (!data || data.length === 0) {
                     return res.status(200).json({
                         success: true,
                         message: 'No data found for the selected date',
-                        filters: { broker_id: broker_id || 'all', trading_date: latestDate },
+                        filters: {
+                            broker_id: broker_id || 'all',
+                            trading_date: latestDate,
+                            start_date: startDate,
+                            end_date: endDate
+                        },
                         data: [],
                         pagination: { total: 0, page: 1, limit: safeLimit, totalPages: 0 }
                     });
                 }
 
-                // ─── Step 3: Format response ──────────────────────────────────────────
+                // ─── Step 5: Format response ──────────────────────────────────────────
                 const formattedData = data.map(row => ({
                     broker_id: row.broker_id,
                     total_buy: Number(row.total_buy || 0),
@@ -226,6 +255,8 @@ export default async function handler(req, res) {
                     total_turnover: Number(row.total_turnover || 0),
                     trading_date: row.trading_date
                 }));
+
+                console.log('[Broker Summary] Returning', formattedData.length, 'rows');
 
                 return res.status(200).json({
                     success: true,
@@ -240,7 +271,14 @@ export default async function handler(req, res) {
                         limit: safeLimit,
                         totalPages: Math.ceil((count || data.length) / safeLimit)
                     },
-                    data: formattedData
+                    data: formattedData,
+                    debug: {
+                        latest_date: latestDate,
+                        start_date: startDate,
+                        end_date: endDate,
+                        raw_count: data.length,
+                        total_count: count || data.length
+                    }
                 });
 
             } catch (error) {
