@@ -1,7 +1,5 @@
-// api/calendar.js — Market Calendar API
 import { createClient } from '@supabase/supabase-js';
 
-// ─── Supabase client ──────────────────────────────────────────────────────────
 const supabaseUrl = process.env.SUPABASE_URL_3;
 const supabaseKey = process.env.SUPABASE_ANON_KEY_3;
 
@@ -11,7 +9,6 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ─── Date helpers ────────────────────────────────────────────────────────────
 function formatDate(date) {
     const d = new Date(date);
     const year = d.getFullYear();
@@ -20,7 +17,6 @@ function formatDate(date) {
     return `${year}-${month}-${day}`;
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
     const origin = req.headers.origin;
     if (origin) {
@@ -46,17 +42,13 @@ export default async function handler(req, res) {
         const safeLimit = Math.min(Math.max(limitNum, 1), 200);
         const offset = (pageNum - 1) * safeLimit;
 
-        // ─── Build query ──────────────────────────────────────────────────────
         let query = supabase
             .from('calendar')
             .select('*', { count: 'exact' });
 
-        // Symbol filter (case-insensitive)
         if (symbol) {
             query = query.ilike('symbol', `%${symbol}%`);
         }
-
-        // Event type filter
         if (event_type) {
             const types = event_type.split(',');
             if (types.length === 1) {
@@ -66,7 +58,6 @@ export default async function handler(req, res) {
             }
         }
 
-        // Date range filter
         const today = formatDate(new Date());
         if (upcoming === 'true') {
             query = query.gte('event_date', today);
@@ -79,7 +70,6 @@ export default async function handler(req, res) {
             }
         }
 
-        // ─── Apply sorting & pagination ──────────────────────────────────────
         const { data, error, count } = await query
             .order('event_date', { ascending: upcoming === 'true' })
             .range(offset, offset + safeLimit - 1);
@@ -89,7 +79,6 @@ export default async function handler(req, res) {
             return res.status(500).json({ success: false, error: error.message });
         }
 
-        // ─── Format response ──────────────────────────────────────────────────
         const formattedData = (data || []).map(row => ({
             id: row.id,
             event_type: row.event_type,
@@ -113,17 +102,18 @@ export default async function handler(req, res) {
         return res.status(200).json({
             success: true,
             filters: {
-                symbol: symbol || 'all',
+                symbol:     symbol     || 'all',
                 event_type: event_type || 'all',
-                from_date: from_date || null,
-                to_date: to_date || null,
-                upcoming: upcoming === 'true' ? true : false
+                from_date:  from_date  || null,
+                to_date:    to_date    || null,
+                upcoming:   upcoming === 'true',
+                today:      today
             },
             summary: {
-                total: count || 0,
-                page: pageNum,
-                limit: safeLimit,
-                totalPages: Math.ceil((count || 0) / safeLimit),
+                total:       count || 0,
+                page:        pageNum,
+                limit:       safeLimit,
+                totalPages:  Math.ceil((count || 0) / safeLimit),
                 eventTypeCounts
             },
             data: formattedData
