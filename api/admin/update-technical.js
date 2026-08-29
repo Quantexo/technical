@@ -427,6 +427,48 @@ function detectBOSandCHoCH(symbol, df, swings) {
 // ------------------------------------------------------------
 // Process SMC for a single symbol
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+// Robust Upsert Helper: batches and captures Supabase errors
+// ------------------------------------------------------------
+async function safeUpsert(supabase, tableName, rows, onConflict = 'symbol, timestamp') {
+    if (!rows || rows.length === 0) return { count: 0, status: 'skipped (no rows)' };
+
+    const chunkSize = 200;
+    let inserted = 0;
+
+    for (let i = 0; i < rows.length; i += chunkSize) {
+        const chunk = rows.slice(i, i + chunkSize);
+        
+        // 1. Try standard upsert with onConflict target
+        let { error } = await supabase
+            .from(tableName)
+            .upsert(chunk, { onConflict });
+
+        // 2. If conflict constraint fails, try insert with ignoreDuplicates
+        if (error) {
+            console.warn(`[SMC Upsert] Retrying ${tableName} via ignoreDuplicates due to: ${error.message}`);
+            const fallback = await supabase
+                .from(tableName)
+                .insert(chunk, { ignoreDuplicates: true });
+            
+            if (fallback.error) {
+                return {
+                    count: inserted,
+                    total: rows.length,
+                    status: 'failed',
+                    error: fallback.error.message || error.message
+                };
+            }
+        }
+        inserted += chunk.length;
+    }
+
+    return { count: inserted, status: 'success' };
+}
+
+// ------------------------------------------------------------
+// Process SMC for a single symbol
+// ------------------------------------------------------------
 async function processSMCForSymbol(supabase, symbol) {
     let allData = [];
     let from = 0;
@@ -466,44 +508,18 @@ async function processSMCForSymbol(supabase, symbol) {
     const fvgs = detectFVG(symbol, df);
     const bosChoch = detectBOSandCHoCH(symbol, df, swings);
 
-    // Upsert into Supabase tables
-    if (swings.length) {
-        try {
-            await supabase.from('smc_swings').upsert(swings, { onConflict: 'symbol, timestamp' });
-        } catch (e) {
-            console.warn(`[SMC] swings upsert warning for ${symbol}:`, e.message);
-        }
-    }
-
-    if (obs.length) {
-        try {
-            await supabase.from('smc_order_blocks').upsert(obs, { onConflict: 'symbol, timestamp' });
-        } catch (e) {
-            console.warn(`[SMC] order_blocks upsert warning for ${symbol}:`, e.message);
-        }
-    }
-
-    if (fvgs.length) {
-        try {
-            await supabase.from('smc_fvg').upsert(fvgs, { onConflict: 'symbol, timestamp' });
-        } catch (e) {
-            console.warn(`[SMC] fvg upsert warning for ${symbol}:`, e.message);
-        }
-    }
-
-    if (bosChoch.length) {
-        try {
-            await supabase.from('smc_bos_choch').upsert(bosChoch, { onConflict: 'symbol, timestamp' });
-        } catch (e) {
-            console.warn(`[SMC] bos_choch upsert warning for ${symbol}:`, e.message);
-        }
-    }
+    // Upsert into Supabase tables with safe fallback and error capture
+    const swingsWrite = await safeUpsert(supabase, 'smc_swings', swings, 'symbol, timestamp');
+    const obsWrite = await safeUpsert(supabase, 'smc_order_blocks', obs, 'symbol, timestamp');
+    const fvgsWrite = await safeUpsert(supabase, 'smc_fvg', fvgs, 'symbol, timestamp');
+    const bosChochWrite = await safeUpsert(supabase, 'smc_bos_choch', bosChoch, 'symbol, timestamp');
 
     return {
-        swings: swings.length,
-        order_blocks: obs.length,
-        fvg: fvgs.length,
-        bos_choch: bosChoch.length
+        rows_analyzed: allData.length,
+        swings: swingsWrite,
+        order_blocks: obsWrite,
+        fvg: fvgsWrite,
+        bos_choch: bosChochWrite
     };
 }
 
@@ -543,7 +559,17 @@ export default async function handler(req, res) {
         let nextOffset = null;
 
         if (symbolParam) {
-            symbolsToProcess = symbolParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+            if (Array.isArray(symbolParam)) {
+                symbolsToProcess = symbolParam
+                    .flatMap(s => typeof s === 'string' ? s.split(',') : [])
+                    .map(s => s.trim().toUpperCase())
+                    .filter(Boolean);
+            } else if (typeof symbolParam === 'string') {
+                symbolsToProcess = symbolParam
+                    .split(',')
+                    .map(s => s.trim().toUpperCase())
+                    .filter(Boolean);
+            }
             totalSymbols = symbolsToProcess.length;
         } else {
             // 1. Get the full list of distinct symbols (sorted)
@@ -586,8 +612,8 @@ export default async function handler(req, res) {
         for (const sym of symbolsToProcess) {
             try {
                 if (isSMC) {
-                    const counts = await processSMCForSymbol(supabase, sym);
-                    results.push({ symbol: sym, status: 'success', counts });
+                    const smcResult = await processSMCForSymbol(supabase, sym);
+                    results.push({ symbol: sym, status: 'success', details: smcResult });
                 } else {
                     const indicators = await processSymbolFull(supabase, sym);
                     const { error: upsertError } = await supabase
