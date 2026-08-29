@@ -320,7 +320,8 @@ function detectOrderBlocks(symbol, df, swings) {
                     timestamp: toISO(candle.time),
                     high: candle.high,
                     low: candle.low,
-                    ob_type: 'bearish'
+                    ob_type: 'bearish',
+                    is_mitigated: false
                 });
                 break;
             } else if (swing.swing_type === 'low' && candle.close < candle.open) {
@@ -329,7 +330,8 @@ function detectOrderBlocks(symbol, df, swings) {
                     timestamp: toISO(candle.time),
                     high: candle.high,
                     low: candle.low,
-                    ob_type: 'bullish'
+                    ob_type: 'bullish',
+                    is_mitigated: false
                 });
                 break;
             }
@@ -340,6 +342,7 @@ function detectOrderBlocks(symbol, df, swings) {
 
 // ------------------------------------------------------------
 // Detect Fair Value Gaps (FVG)
+// Schema: symbol, start_time, end_time, high, low, fvg_type, is_mitigated
 // ------------------------------------------------------------
 function detectFVG(symbol, df) {
     const fvgs = [];
@@ -354,20 +357,24 @@ function detectFVG(symbol, df) {
         if (c2.low > c0.high) {
             fvgs.push({
                 symbol,
-                timestamp: toISO(c1.time),
-                top: c2.low,
-                bottom: c0.high,
-                fvg_type: 'bullish'
+                start_time: toISO(c0.time),
+                end_time: toISO(c2.time),
+                high: c2.low,
+                low: c0.high,
+                fvg_type: 'bullish',
+                is_mitigated: false
             });
         }
         // Bearish FVG: Current candle's high < Candle-2's low
         else if (c2.high < c0.low) {
             fvgs.push({
                 symbol,
-                timestamp: toISO(c1.time),
-                top: c0.low,
-                bottom: c2.high,
-                fvg_type: 'bearish'
+                start_time: toISO(c0.time),
+                end_time: toISO(c2.time),
+                high: c0.low,
+                low: c2.high,
+                fvg_type: 'bearish',
+                is_mitigated: false
             });
         }
     }
@@ -376,6 +383,7 @@ function detectFVG(symbol, df) {
 
 // ------------------------------------------------------------
 // Detect Break of Structure (BOS) & Change of Character (CHoCH)
+// Schema: symbol, timestamp, signal_type, direction, price_level
 // ------------------------------------------------------------
 function detectBOSandCHoCH(symbol, df, swings) {
     const structures = [];
@@ -402,9 +410,9 @@ function detectBOSandCHoCH(symbol, df, swings) {
             structures.push({
                 symbol,
                 timestamp: candleTime,
-                price: candle.close,
-                structure_type: isChoch ? 'CHoCH' : 'BOS',
-                direction: 'bullish'
+                signal_type: isChoch ? 'CHoCH' : 'BOS',
+                direction: 'bullish',
+                price_level: candle.close
             });
             lastBreakType = 'bullish';
             lastSwingHigh = null; // consumed
@@ -413,9 +421,9 @@ function detectBOSandCHoCH(symbol, df, swings) {
             structures.push({
                 symbol,
                 timestamp: candleTime,
-                price: candle.close,
-                structure_type: isChoch ? 'CHoCH' : 'BOS',
-                direction: 'bearish'
+                signal_type: isChoch ? 'CHoCH' : 'BOS',
+                direction: 'bearish',
+                price_level: candle.close
             });
             lastBreakType = 'bearish';
             lastSwingLow = null; // consumed
@@ -425,40 +433,37 @@ function detectBOSandCHoCH(symbol, df, swings) {
 }
 
 // ------------------------------------------------------------
-// Process SMC for a single symbol
+// Robust Insert Helper: Deletes existing symbol data to prevent
+// unique constraint violations, then batch inserts new rows.
 // ------------------------------------------------------------
-// ------------------------------------------------------------
-// Robust Upsert Helper: batches and captures Supabase errors
-// ------------------------------------------------------------
-async function safeUpsert(supabase, tableName, rows, onConflict = 'symbol, timestamp') {
+async function safeInsertSymbolData(supabase, tableName, symbol, rows) {
     if (!rows || rows.length === 0) return { count: 0, status: 'skipped (no rows)' };
 
+    // 1. Clear old data for this symbol
+    const { error: delError } = await supabase
+        .from(tableName)
+        .delete()
+        .eq('symbol', symbol);
+
+    if (delError) {
+        console.warn(`[SMC Delete] ${tableName} for ${symbol}: ${delError.message}`);
+    }
+
+    // 2. Insert new data in chunks of 200
     const chunkSize = 200;
     let inserted = 0;
 
     for (let i = 0; i < rows.length; i += chunkSize) {
         const chunk = rows.slice(i, i + chunkSize);
-        
-        // 1. Try standard upsert with onConflict target
-        let { error } = await supabase
-            .from(tableName)
-            .upsert(chunk, { onConflict });
+        const { error } = await supabase.from(tableName).insert(chunk);
 
-        // 2. If conflict constraint fails, try insert with ignoreDuplicates
         if (error) {
-            console.warn(`[SMC Upsert] Retrying ${tableName} via ignoreDuplicates due to: ${error.message}`);
-            const fallback = await supabase
-                .from(tableName)
-                .insert(chunk, { ignoreDuplicates: true });
-            
-            if (fallback.error) {
-                return {
-                    count: inserted,
-                    total: rows.length,
-                    status: 'failed',
-                    error: fallback.error.message || error.message
-                };
-            }
+            return {
+                count: inserted,
+                total: rows.length,
+                status: 'failed',
+                error: error.message
+            };
         }
         inserted += chunk.length;
     }
@@ -508,11 +513,11 @@ async function processSMCForSymbol(supabase, symbol) {
     const fvgs = detectFVG(symbol, df);
     const bosChoch = detectBOSandCHoCH(symbol, df, swings);
 
-    // Upsert into Supabase tables with safe fallback and error capture
-    const swingsWrite = await safeUpsert(supabase, 'smc_swings', swings, 'symbol, timestamp');
-    const obsWrite = await safeUpsert(supabase, 'smc_order_blocks', obs, 'symbol, timestamp');
-    const fvgsWrite = await safeUpsert(supabase, 'smc_fvg', fvgs, 'symbol, timestamp');
-    const bosChochWrite = await safeUpsert(supabase, 'smc_bos_choch', bosChoch, 'symbol, timestamp');
+    // Insert into Supabase tables with clean symbol-level replacements
+    const swingsWrite = await safeInsertSymbolData(supabase, 'smc_swings', symbol, swings);
+    const obsWrite = await safeInsertSymbolData(supabase, 'smc_order_blocks', symbol, obs);
+    const fvgsWrite = await safeInsertSymbolData(supabase, 'smc_fvg', symbol, fvgs);
+    const bosChochWrite = await safeInsertSymbolData(supabase, 'smc_bos_choch', symbol, bosChoch);
 
     return {
         rows_analyzed: allData.length,
