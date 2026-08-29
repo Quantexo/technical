@@ -262,10 +262,252 @@ async function processSymbolFull(supabase, symbol) {
     } catch (err) {
         throw err;
     }
+    // ------------------------------------------------------------
+    // SMC Helper: convert Date to ISO string
+    // ------------------------------------------------------------
+    function toISO(date) {
+        return date instanceof Date ? date.toISOString() : date;
+    }
+
+    // ------------------------------------------------------------
+    // Detect Swing Highs and Lows
+    // ------------------------------------------------------------
+    function detectSwings(symbol, df, windowSize = 5) {
+        const swings = [];
+        for (let i = windowSize; i < df.length - windowSize; i++) {
+            const current = df[i];
+            const left = df.slice(i - windowSize, i);
+            const right = df.slice(i + 1, i + windowSize + 1);
+
+            const leftHighs = left.map(c => c.high);
+            const rightHighs = right.map(c => c.high);
+            if (current.high > Math.max(...leftHighs) && current.high > Math.max(...rightHighs)) {
+                swings.push({ symbol, timestamp: toISO(current.time), price: current.high, swing_type: 'high' });
+            }
+
+            const leftLows = left.map(c => c.low);
+            const rightLows = right.map(c => c.low);
+            if (current.low < Math.min(...leftLows) && current.low < Math.min(...rightLows)) {
+                swings.push({ symbol, timestamp: toISO(current.time), price: current.low, swing_type: 'low' });
+            }
+        }
+        return swings;
+    }
+
+    // ------------------------------------------------------------
+    // Detect Order Blocks (OB)
+    // ------------------------------------------------------------
+    function detectOrderBlocks(symbol, df, swings) {
+        const obs = [];
+        if (!df.length || !swings.length) return obs;
+        const avgRange = df.reduce((sum, c) => sum + (c.high - c.low), 0) / df.length;
+
+        for (const swing of swings) {
+            const swingIdx = df.findIndex(c => toISO(c.time) === swing.timestamp);
+            if (swingIdx < 0) continue;
+
+            const start = Math.max(0, swingIdx - 10);
+            for (let i = swingIdx - 1; i >= start; i--) {
+                const candle = df[i];
+                const range = candle.high - candle.low;
+                if (range < 1.5 * avgRange) continue;
+
+                if (swing.swing_type === 'high' && candle.close > candle.open) {
+                    obs.push({
+                        symbol,
+                        timestamp: toISO(candle.time),
+                        high: candle.high,
+                        low: candle.low,
+                        ob_type: 'bearish'
+                    });
+                    break;
+                } else if (swing.swing_type === 'low' && candle.close < candle.open) {
+                    obs.push({
+                        symbol,
+                        timestamp: toISO(candle.time),
+                        high: candle.high,
+                        low: candle.low,
+                        ob_type: 'bullish'
+                    });
+                    break;
+                }
+            }
+        }
+        return obs;
+    }
+
+    // ------------------------------------------------------------
+    // Detect Fair Value Gaps (FVG)
+    // ------------------------------------------------------------
+    function detectFVG(symbol, df) {
+        const fvgs = [];
+        if (df.length < 3) return fvgs;
+
+        for (let i = 2; i < df.length; i++) {
+            const c0 = df[i - 2];
+            const c1 = df[i - 1];
+            const c2 = df[i];
+
+            // Bullish FVG: Current candle's low > Candle-2's high
+            if (c2.low > c0.high) {
+                fvgs.push({
+                    symbol,
+                    timestamp: toISO(c1.time),
+                    top: c2.low,
+                    bottom: c0.high,
+                    fvg_type: 'bullish'
+                });
+            }
+            // Bearish FVG: Current candle's high < Candle-2's low
+            else if (c2.high < c0.low) {
+                fvgs.push({
+                    symbol,
+                    timestamp: toISO(c1.time),
+                    top: c0.low,
+                    bottom: c2.high,
+                    fvg_type: 'bearish'
+                });
+            }
+        }
+        return fvgs;
+    }
+
+    // ------------------------------------------------------------
+    // Detect Break of Structure (BOS) & Change of Character (CHoCH)
+    // ------------------------------------------------------------
+    function detectBOSandCHoCH(symbol, df, swings) {
+        const structures = [];
+        if (df.length < 5 || swings.length < 2) return structures;
+
+        let lastSwingHigh = null;
+        let lastSwingLow = null;
+        let lastBreakType = null; // 'bullish' | 'bearish'
+
+        for (let i = 0; i < df.length; i++) {
+            const candle = df[i];
+            const candleTime = toISO(candle.time);
+
+            // Update active swing levels up to current candle
+            const activeSwings = swings.filter(s => new Date(s.timestamp) <= new Date(candleTime));
+            const recentHighs = activeSwings.filter(s => s.swing_type === 'high');
+            const recentLows = activeSwings.filter(s => s.swing_type === 'low');
+
+            if (recentHighs.length) lastSwingHigh = recentHighs[recentHighs.length - 1];
+            if (recentLows.length) lastSwingLow = recentLows[recentLows.length - 1];
+
+            if (lastSwingHigh && candle.close > lastSwingHigh.price) {
+                const isChoch = lastBreakType === 'bearish';
+                structures.push({
+                    symbol,
+                    timestamp: candleTime,
+                    price: candle.close,
+                    structure_type: isChoch ? 'CHoCH' : 'BOS',
+                    direction: 'bullish'
+                });
+                lastBreakType = 'bullish';
+                lastSwingHigh = null; // consumed
+            } else if (lastSwingLow && candle.close < lastSwingLow.price) {
+                const isChoch = lastBreakType === 'bullish';
+                structures.push({
+                    symbol,
+                    timestamp: candleTime,
+                    price: candle.close,
+                    structure_type: isChoch ? 'CHoCH' : 'BOS',
+                    direction: 'bearish'
+                });
+                lastBreakType = 'bearish';
+                lastSwingLow = null; // consumed
+            }
+        }
+        return structures;
+    }
+
+    // ------------------------------------------------------------
+    // Process SMC for a single symbol
+    // ------------------------------------------------------------
+    async function processSMCForSymbol(supabase, symbol) {
+        let allData = [];
+        let from = 0;
+        const pageSize = 1000;
+        let hasMore = true;
+
+        while (hasMore) {
+            const { data, error } = await supabase
+                .from('prices')
+                .select('date, open, high, low, close, volume')
+                .eq('symbol', symbol)
+                .order('date', { ascending: true })
+                .range(from, from + pageSize - 1);
+
+            if (error) throw error;
+            if (!data || data.length === 0) break;
+            allData.push(...data);
+            if (data.length < pageSize) hasMore = false;
+            from += pageSize;
+        }
+
+        if (!allData || allData.length < 10) {
+            throw new Error(`Insufficient data for SMC (${allData?.length || 0} rows)`);
+        }
+
+        const df = allData.map(d => ({
+            time: new Date(d.date),
+            open: parseFloat(d.open),
+            high: parseFloat(d.high),
+            low: parseFloat(d.low),
+            close: parseFloat(d.close),
+            volume: parseInt(d.volume, 10) || 0
+        }));
+
+        const swings = detectSwings(symbol, df);
+        const obs = detectOrderBlocks(symbol, df, swings);
+        const fvgs = detectFVG(symbol, df);
+        const bosChoch = detectBOSandCHoCH(symbol, df, swings);
+
+        // Upsert into Supabase tables
+        if (swings.length) {
+            try {
+                await supabase.from('smc_swings').upsert(swings, { onConflict: 'symbol, timestamp' });
+            } catch (e) {
+                console.warn(`[SMC] swings upsert warning for ${symbol}:`, e.message);
+            }
+        }
+
+        if (obs.length) {
+            try {
+                await supabase.from('smc_order_blocks').upsert(obs, { onConflict: 'symbol, timestamp' });
+            } catch (e) {
+                console.warn(`[SMC] order_blocks upsert warning for ${symbol}:`, e.message);
+            }
+        }
+
+        if (fvgs.length) {
+            try {
+                await supabase.from('smc_fvg').upsert(fvgs, { onConflict: 'symbol, timestamp' });
+            } catch (e) {
+                console.warn(`[SMC] fvg upsert warning for ${symbol}:`, e.message);
+            }
+        }
+
+        if (bosChoch.length) {
+            try {
+                await supabase.from('smc_bos_choch').upsert(bosChoch, { onConflict: 'symbol, timestamp' });
+            } catch (e) {
+                console.warn(`[SMC] bos_choch upsert warning for ${symbol}:`, e.message);
+            }
+        }
+
+        return {
+            swings: swings.length,
+            order_blocks: obs.length,
+            fvg: fvgs.length,
+            bos_choch: bosChoch.length
+        };
+    }
 }
 
 // ------------------------------------------------------------
-// Main handler – supports offset and limit for symbol batching
+// Main handler – supports route (technical | update-smc), symbol, offset and limit
 // ------------------------------------------------------------
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -280,7 +522,9 @@ export default async function handler(req, res) {
         return res.status(401).json({ error: 'Unauthorized: Invalid or missing ADMIN_SECRET_KEY' });
     }
 
-    // Pagination parameters for symbols
+    const route = (req.query.route || 'technical').toLowerCase();
+    const symbolParam = req.query.symbol || req.query.symbols;
+
     const offset = parseInt(req.query.offset) || 0;
     const limit = Math.min(parseInt(req.query.limit) || 10, 50); // max 50 per batch
 
@@ -293,55 +537,73 @@ export default async function handler(req, res) {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     try {
-        // 1. Get the full list of distinct symbols (sorted)
-        let allRows = [];
-        let from = 0;
-        const pageSize = 1000;
-        let hasMore = true;
-        while (hasMore) {
-            const { data, error } = await supabase
-                .from('prices')
-                .select('symbol')
-                .range(from, from + pageSize - 1);
-            if (error) throw error;
-            if (!data || data.length === 0) break;
-            allRows.push(...data);
-            if (data.length < pageSize) hasMore = false;
-            from += pageSize;
-        }
-        const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))].sort();
-        const totalSymbols = uniqueSymbols.length;
+        let symbolsToProcess = [];
+        let totalSymbols = 0;
+        let nextOffset = null;
 
-        // 2. Slice the batch
-        const symbolsToProcess = uniqueSymbols.slice(offset, offset + limit);
-        if (symbolsToProcess.length === 0) {
-            return res.status(200).json({
-                message: 'No more symbols to process',
-                total_symbols: totalSymbols,
-                processed: 0,
-                next_offset: offset,
-            });
+        if (symbolParam) {
+            symbolsToProcess = symbolParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+            totalSymbols = symbolsToProcess.length;
+        } else {
+            // 1. Get the full list of distinct symbols (sorted)
+            let allRows = [];
+            let from = 0;
+            const pageSize = 1000;
+            let hasMore = true;
+            while (hasMore) {
+                const { data, error } = await supabase
+                    .from('prices')
+                    .select('symbol')
+                    .range(from, from + pageSize - 1);
+                if (error) throw error;
+                if (!data || data.length === 0) break;
+                allRows.push(...data);
+                if (data.length < pageSize) hasMore = false;
+                from += pageSize;
+            }
+            const uniqueSymbols = [...new Set(allRows.map(r => r.symbol))].sort();
+            totalSymbols = uniqueSymbols.length;
+
+            // 2. Slice the batch
+            symbolsToProcess = uniqueSymbols.slice(offset, offset + limit);
+            if (symbolsToProcess.length === 0) {
+                return res.status(200).json({
+                    route,
+                    message: 'No more symbols to process',
+                    total_symbols: totalSymbols,
+                    processed: 0,
+                    next_offset: offset,
+                });
+            }
+            nextOffset = offset + symbolsToProcess.length;
         }
+
+        const isSMC = route === 'update-smc' || route === 'smc';
 
         // 3. Process symbols sequentially (to avoid timeouts)
         const results = [];
         for (const sym of symbolsToProcess) {
             try {
-                const indicators = await processSymbolFull(supabase, sym);
-                const { error: upsertError } = await supabase
-                    .from('technical_indicators')
-                    .upsert(indicators, { onConflict: 'symbol' });
-                if (upsertError) throw upsertError;
-                results.push({ symbol: sym, status: 'success' });
+                if (isSMC) {
+                    const counts = await processSMCForSymbol(supabase, sym);
+                    results.push({ symbol: sym, status: 'success', counts });
+                } else {
+                    const indicators = await processSymbolFull(supabase, sym);
+                    const { error: upsertError } = await supabase
+                        .from('technical_indicators')
+                        .upsert(indicators, { onConflict: 'symbol' });
+                    if (upsertError) throw upsertError;
+                    results.push({ symbol: sym, status: 'success' });
+                }
             } catch (err) {
                 results.push({ symbol: sym, status: 'failed', error: err.message });
             }
-            console.log(`Processed ${sym} (${results.length}/${symbolsToProcess.length})`);
+            console.log(`[${route}] Processed ${sym} (${results.length}/${symbolsToProcess.length})`);
         }
 
-        const nextOffset = offset + symbolsToProcess.length;
         return res.status(200).json({
-            message: 'Batch processed',
+            route: isSMC ? 'update-smc' : 'technical',
+            message: `${isSMC ? 'SMC' : 'Technical indicators'} batch processed`,
             total_symbols: totalSymbols,
             processed_symbols: symbolsToProcess.length,
             next_offset: nextOffset,
