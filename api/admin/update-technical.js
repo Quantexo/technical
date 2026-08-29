@@ -273,108 +273,294 @@ function toISO(date) {
 
 // ------------------------------------------------------------
 // Detect Swing Highs and Lows
+// Rules:
+// 1. Window = 15 candles each side; accepted if confirmed within 13-15 candle range
+// 2. Body-close confirmation: candle must CLOSE above/below surrounding body tops/bottoms
+//    (if wick breaks but close doesn't → liquidity sweep, NOT a swing)
+// 3. Minimum Fibonacci size filter: swing must be >= 50% of (avgRange * window) from last opposite swing
+// 4. Alternating enforcement: no two consecutive highs or lows (keep the more extreme one)
 // ------------------------------------------------------------
-function detectSwings(symbol, df, windowSize = 5) {
-    const swings = [];
+function detectSwings(symbol, df, windowSize = 15) {
+    const rawSwings = [];
+    const minWindow = 10; // Flexible: body confirmation uses tighter 13-candle window
+
+    const avgRange = df.reduce((sum, c) => sum + (c.high - c.low), 0) / df.length;
+    // Minimum move required from last opposite swing (Fibonacci 0.5 filter)
+    const minSwingSize = avgRange * 5;
+
     for (let i = windowSize; i < df.length - windowSize; i++) {
         const current = df[i];
-        const left = df.slice(i - windowSize, i);
-        const right = df.slice(i + 1, i + windowSize + 1);
 
-        const leftHighs = left.map(c => c.high);
-        const rightHighs = right.map(c => c.high);
+        // --- Swing High ---
+        // Step 1: Wick must be the highest in the full window (standard pivot)
+        const leftHighs = df.slice(i - windowSize, i).map(c => c.high);
+        const rightHighs = df.slice(i + 1, i + windowSize + 1).map(c => c.high);
+
         if (current.high > Math.max(...leftHighs) && current.high > Math.max(...rightHighs)) {
-            swings.push({ symbol, timestamp: toISO(current.time), price: current.high, swing_type: 'high' });
+            // Step 2: CLOSE must be above body tops of surrounding 13 candles
+            // (if only wick breaks but close doesn't → liquidity sweep, skip)
+            const leftBodyTops = df.slice(i - minWindow, i).map(c => Math.max(c.open, c.close));
+            const rightBodyTops = df.slice(i + 1, i + minWindow + 1).map(c => Math.max(c.open, c.close));
+
+            if (current.close > Math.max(...leftBodyTops) && current.close > Math.max(...rightBodyTops)) {
+                rawSwings.push({
+                    symbol,
+                    timestamp: toISO(current.time),
+                    price: current.high,
+                    swing_type: 'high'
+                });
+            }
+            // else: wick swept liquidity but close didn't confirm → skip (liquidity sweep)
         }
 
-        const leftLows = left.map(c => c.low);
-        const rightLows = right.map(c => c.low);
+        // --- Swing Low ---
+        // Step 1: Wick must be the lowest in the full window (standard pivot)
+        const leftLows = df.slice(i - windowSize, i).map(c => c.low);
+        const rightLows = df.slice(i + 1, i + windowSize + 1).map(c => c.low);
+
         if (current.low < Math.min(...leftLows) && current.low < Math.min(...rightLows)) {
-            swings.push({ symbol, timestamp: toISO(current.time), price: current.low, swing_type: 'low' });
+            // Step 2: CLOSE must be below body bottoms of surrounding 13 candles
+            const leftBodyBots = df.slice(i - minWindow, i).map(c => Math.min(c.open, c.close));
+            const rightBodyBots = df.slice(i + 1, i + minWindow + 1).map(c => Math.min(c.open, c.close));
+
+            if (current.close < Math.min(...leftBodyBots) && current.close < Math.min(...rightBodyBots)) {
+                rawSwings.push({
+                    symbol,
+                    timestamp: toISO(current.time),
+                    price: current.low,
+                    swing_type: 'low'
+                });
+            }
+            // else: wick swept liquidity but close didn't confirm → skip (liquidity sweep)
         }
     }
-    return swings;
+
+    // --- Pass 2: Alternating enforcement + Fibonacci 0.5 minimum size filter ---
+    // Rules:
+    //   • No two consecutive highs → keep only the HIGHER one
+    //   • No two consecutive lows  → keep only the LOWER one
+    //   • Consecutive opposite swings must be >= minSwingSize apart (Fib 0.5 noise filter)
+    const filteredSwings = [];
+    let lastSwing = null;
+
+    for (const swing of rawSwings) {
+        if (!lastSwing) {
+            filteredSwings.push(swing);
+            lastSwing = swing;
+            continue;
+        }
+
+        if (swing.swing_type === lastSwing.swing_type) {
+            // Same type: enforce alternating — keep only the more extreme one
+            const last = filteredSwings[filteredSwings.length - 1];
+            if (swing.swing_type === 'high' && swing.price > last.price) {
+                // New high is higher → replace previous high
+                filteredSwings[filteredSwings.length - 1] = swing;
+                lastSwing = swing;
+            } else if (swing.swing_type === 'low' && swing.price < last.price) {
+                // New low is lower → replace previous low
+                filteredSwings[filteredSwings.length - 1] = swing;
+                lastSwing = swing;
+            }
+            // else: ignore (lower high or higher low — not significant)
+        } else {
+            // Different type: apply minimum Fibonacci 0.5 size filter
+            const sizeDiff = Math.abs(swing.price - lastSwing.price);
+            if (sizeDiff >= minSwingSize) {
+                filteredSwings.push(swing);
+                lastSwing = swing;
+            }
+            // else: move too small (< 50% of expected range) → filter as noise
+        }
+    }
+
+    return filteredSwings;
 }
+
 
 // ------------------------------------------------------------
 // Detect Order Blocks (OB)
+// SMC / ICT Rule (color-independent):
+// - Bullish OB: The candle (any color) that SWEPT its previous candle's low (candle.low < prevCandle.low)
+//              before a strong bullish displacement
+// - Bearish OB: The candle (any color) that SWEPT its previous candle's high (candle.high > prevCandle.high)
+//              before a strong bearish displacement
 // ------------------------------------------------------------
 function detectOrderBlocks(symbol, df, swings) {
     const obs = [];
-    if (!df.length || !swings.length) return obs;
-    const avgRange = df.reduce((sum, c) => sum + (c.high - c.low), 0) / df.length;
+    if (df.length < 5) return obs;
 
-    for (const swing of swings) {
-        const swingIdx = df.findIndex(c => toISO(c.time) === swing.timestamp);
-        if (swingIdx < 0) continue;
+    const bodySizes = df.map(c => Math.abs(c.close - c.open));
+    const avgBody = bodySizes.reduce((sum, b) => sum + b, 0) / df.length;
 
-        const start = Math.max(0, swingIdx - 10);
-        for (let i = swingIdx - 1; i >= start; i--) {
-            const candle = df[i];
-            const range = candle.high - candle.low;
-            if (range < 1.5 * avgRange) continue;
+    for (let i = 2; i < df.length - 1; i++) {
+        const cCurr = df[i];
+        const cPrev = df[i - 1];
 
-            if (swing.swing_type === 'high' && candle.close > candle.open) {
-                obs.push({
-                    symbol,
-                    timestamp: toISO(candle.time),
-                    high: candle.high,
-                    low: candle.low,
-                    ob_type: 'bearish',
-                    is_mitigated: false
-                });
-                break;
-            } else if (swing.swing_type === 'low' && candle.close < candle.open) {
-                obs.push({
-                    symbol,
-                    timestamp: toISO(candle.time),
-                    high: candle.high,
-                    low: candle.low,
-                    ob_type: 'bullish',
-                    is_mitigated: false
-                });
-                break;
+        // 1. Bullish Displacement -> Bullish OB is the candle that swept the previous candle's low
+        const isBullishImpulse = 
+            (cCurr.close > cCurr.open && (cCurr.close - cCurr.open) >= 1.2 * avgBody && cCurr.close > cPrev.high) ||
+            (i < df.length - 1 && df[i + 1].low > cPrev.high);
+
+        if (isBullishImpulse) {
+            for (let j = i - 1; j >= Math.max(1, i - 5); j--) {
+                const candle = df[j];
+                const prevCandle = df[j - 1];
+
+                // Liquidity sweep: candle swept previous candle's low (color independent)
+                if (candle.low < prevCandle.low) {
+                    const obTimestamp = toISO(candle.time);
+                    if (!obs.some(o => o.timestamp === obTimestamp && o.ob_type === 'bullish')) {
+                        let isMitigated = false;
+                        for (let k = i + 1; k < df.length; k++) {
+                            if (df[k].low <= candle.high) {
+                                isMitigated = true;
+                                break;
+                            }
+                        }
+
+                        obs.push({
+                            symbol,
+                            timestamp: obTimestamp,
+                            high: candle.high,
+                            low: candle.low,
+                            ob_type: 'bullish',
+                            is_mitigated: isMitigated
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 2. Bearish Displacement -> Bearish OB is the candle that swept the previous candle's high
+        const isBearishImpulse = 
+            (cCurr.close < cCurr.open && (cCurr.open - cCurr.close) >= 1.2 * avgBody && cCurr.close < cPrev.low) ||
+            (i < df.length - 1 && df[i + 1].high < cPrev.low);
+
+        if (isBearishImpulse) {
+            for (let j = i - 1; j >= Math.max(1, i - 5); j--) {
+                const candle = df[j];
+                const prevCandle = df[j - 1];
+
+                // Liquidity sweep: candle swept previous candle's high (color independent)
+                if (candle.high > prevCandle.high) {
+                    const obTimestamp = toISO(candle.time);
+                    if (!obs.some(o => o.timestamp === obTimestamp && o.ob_type === 'bearish')) {
+                        let isMitigated = false;
+                        for (let k = i + 1; k < df.length; k++) {
+                            if (df[k].high >= candle.low) {
+                                isMitigated = true;
+                                break;
+                            }
+                        }
+
+                        obs.push({
+                            symbol,
+                            timestamp: obTimestamp,
+                            high: candle.high,
+                            low: candle.low,
+                            ob_type: 'bearish',
+                            is_mitigated: isMitigated
+                        });
+                    }
+                    break;
+                }
             }
         }
     }
+
     return obs;
 }
 
 // ------------------------------------------------------------
 // Detect Fair Value Gaps (FVG)
 // Schema: symbol, start_time, end_time, high, low, fvg_type, is_mitigated
+// SMC / ICT Criteria:
+// 1. Gap exists between c0 and c2 (no overlap)
+// 2. Middle candle (c1) must be an impulse (body >= average body size)
+// 3. Gap size must be >= minimum threshold to filter noise
+// 4. FVG direction follows c2 (displacement candle), not just gap geometry
+// 5. Mitigation: price CLOSES inside the gap (not just wicks into it)
 // ------------------------------------------------------------
 function detectFVG(symbol, df) {
     const fvgs = [];
     if (df.length < 3) return fvgs;
 
-    for (let i = 2; i < df.length; i++) {
-        const c0 = df[i - 2];
-        const c1 = df[i - 1];
-        const c2 = df[i];
+    const bodySizes = df.map(c => Math.abs(c.close - c.open));
+    const avgBody = bodySizes.reduce((sum, b) => sum + b, 0) / df.length;
+    const avgRange = df.reduce((sum, c) => sum + (c.high - c.low), 0) / df.length;
+    const minGapSize = avgRange * 0.3; // Minimum gap must be 30% of average candle range
 
-        // Bullish FVG: Current candle's low > Candle-2's high
-        if (c2.low > c0.high) {
+    for (let i = 2; i < df.length; i++) {
+        const c0 = df[i - 2]; // Candle before the impulse
+        const c1 = df[i - 1]; // Impulse / displacement candle
+        const c2 = df[i];     // Candle after impulse
+
+        const c1Body = Math.abs(c1.close - c1.open);
+
+        // Criteria 2: Middle candle (c1) must be an impulse candle
+        if (c1Body < avgBody) continue;
+
+        // --- Bullish FVG ---
+        // Gap: c2.low > c0.high  (gap between bottom of c2 and top of c0)
+        // Direction: c2 must be bullish (close > open), confirming upward displacement
+        if (c2.low > c0.high && c2.close > c2.open) {
+            const gapHigh = c2.low;
+            const gapLow = c0.high;
+            const gapSize = gapHigh - gapLow;
+
+            // Criteria 3: Minimum gap size
+            if (gapSize < minGapSize) continue;
+
+            // Criteria 5: Mitigation — any candle's LOW wick enters the gap
+            let isMitigated = false;
+            for (let k = i + 1; k < df.length; k++) {
+                if (df[k].low <= gapHigh) {
+                    isMitigated = true;
+                    break;
+                }
+            }
+
             fvgs.push({
                 symbol,
                 start_time: toISO(c0.time),
                 end_time: toISO(c2.time),
-                high: c2.low,
-                low: c0.high,
+                high: gapHigh,
+                low: gapLow,
                 fvg_type: 'bullish',
-                is_mitigated: false
+                is_mitigated: isMitigated
             });
         }
-        // Bearish FVG: Current candle's high < Candle-2's low
-        else if (c2.high < c0.low) {
+
+        // --- Bearish FVG ---
+        // Gap: c2.high < c0.low  (gap between top of c2 and bottom of c0)
+        // Direction: c2 must be bearish (close < open), confirming downward displacement
+        else if (c2.high < c0.low && c2.close < c2.open) {
+            const gapHigh = c0.low;
+            const gapLow = c2.high;
+            const gapSize = gapHigh - gapLow;
+
+            // Criteria 3: Minimum gap size
+            if (gapSize < minGapSize) continue;
+
+            // Criteria 5: Mitigation — any candle's HIGH wick enters the gap
+            let isMitigated = false;
+            for (let k = i + 1; k < df.length; k++) {
+                if (df[k].high >= gapLow) {
+                    isMitigated = true;
+                    break;
+                }
+            }
+
             fvgs.push({
                 symbol,
                 start_time: toISO(c0.time),
                 end_time: toISO(c2.time),
-                high: c0.low,
-                low: c2.high,
+                high: gapHigh,
+                low: gapLow,
                 fvg_type: 'bearish',
-                is_mitigated: false
+                is_mitigated: isMitigated
             });
         }
     }
@@ -384,51 +570,108 @@ function detectFVG(symbol, df) {
 // ------------------------------------------------------------
 // Detect Break of Structure (BOS) & Change of Character (CHoCH)
 // Schema: symbol, timestamp, signal_type, direction, price_level
+// SMC / ICT Rules:
+// - BOS bullish  : In uptrend (HH+HL), close breaks ABOVE last swing high  → continuation
+// - BOS bearish  : In downtrend (LH+LL), close breaks BELOW last swing low → continuation
+// - CHoCH bullish: In downtrend, close breaks ABOVE last swing high         → reversal
+// - CHoCH bearish: In uptrend, close breaks BELOW last swing low            → reversal
+// price_level = the swing level that was broken (for chart plotting)
 // ------------------------------------------------------------
 function detectBOSandCHoCH(symbol, df, swings) {
     const structures = [];
     if (df.length < 5 || swings.length < 2) return structures;
 
-    let lastSwingHigh = null;
-    let lastSwingLow = null;
-    let lastBreakType = null; // 'bullish' | 'bearish'
+    // Sort swings chronologically
+    const sortedSwings = [...swings].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    let swingPtr = 0;    // Pointer into sortedSwings
+    let lastHigh = null; // Most recent swing high
+    let lastLow = null;  // Most recent swing low
+    let prevHigh = null; // Swing high before lastHigh
+    let prevLow = null;  // Swing low before lastLow
+    let trend = null;    // 'bullish' | 'bearish' | null (unknown)
+
+    // Track which swing level was last broken (to avoid re-triggering)
+    let consumedHigh = null;
+    let consumedLow = null;
 
     for (let i = 0; i < df.length; i++) {
         const candle = df[i];
         const candleTime = toISO(candle.time);
 
-        // Update active swing levels up to current candle
-        const activeSwings = swings.filter(s => new Date(s.timestamp) <= new Date(candleTime));
-        const recentHighs = activeSwings.filter(s => s.swing_type === 'high');
-        const recentLows = activeSwings.filter(s => s.swing_type === 'low');
+        // Ingest all swings that occurred up to this candle
+        while (
+            swingPtr < sortedSwings.length &&
+            new Date(sortedSwings[swingPtr].timestamp) <= new Date(candleTime)
+        ) {
+            const s = sortedSwings[swingPtr];
+            if (s.swing_type === 'high') {
+                prevHigh = lastHigh;
+                lastHigh = s;
+            } else {
+                prevLow = lastLow;
+                lastLow = s;
+            }
+            swingPtr++;
+        }
 
-        if (recentHighs.length) lastSwingHigh = recentHighs[recentHighs.length - 1];
-        if (recentLows.length) lastSwingLow = recentLows[recentLows.length - 1];
+        if (!lastHigh || !lastLow) continue;
 
-        if (lastSwingHigh && candle.close > lastSwingHigh.price) {
-            const isChoch = lastBreakType === 'bearish';
+        // Determine trend from swing sequence (HH+HL = bullish, LH+LL = bearish)
+        if (prevHigh && prevLow) {
+            const isHH = lastHigh.price > prevHigh.price;
+            const isHL = lastLow.price > prevLow.price;
+            const isLH = lastHigh.price < prevHigh.price;
+            const isLL = lastLow.price < prevLow.price;
+
+            if (isHH && isHL) trend = 'bullish';
+            else if (isLH && isLL) trend = 'bearish';
+            // else: mixed structure (consolidation) → keep last known trend
+        }
+
+        // --- Check break of swing HIGH ---
+        if (
+            lastHigh &&
+            lastHigh !== consumedHigh &&
+            candle.close > lastHigh.price
+        ) {
+            const isBOS = trend === 'bullish';  // Breaking high in uptrend = BOS
+            const isCHoCH = trend === 'bearish'; // Breaking high in downtrend = CHoCH
+
             structures.push({
                 symbol,
                 timestamp: candleTime,
-                signal_type: isChoch ? 'CHoCH' : 'BOS',
+                signal_type: isCHoCH ? 'CHoCH' : 'BOS',
                 direction: 'bullish',
-                price_level: candle.close
+                price_level: lastHigh.price  // Level that was broken
             });
-            lastBreakType = 'bullish';
-            lastSwingHigh = null; // consumed
-        } else if (lastSwingLow && candle.close < lastSwingLow.price) {
-            const isChoch = lastBreakType === 'bullish';
+
+            trend = 'bullish';            // Trend shifts / confirms bullish
+            consumedHigh = lastHigh;       // Mark as consumed to avoid re-trigger
+        }
+
+        // --- Check break of swing LOW ---
+        else if (
+            lastLow &&
+            lastLow !== consumedLow &&
+            candle.close < lastLow.price
+        ) {
+            const isBOS = trend === 'bearish';   // Breaking low in downtrend = BOS
+            const isCHoCH = trend === 'bullish'; // Breaking low in uptrend = CHoCH
+
             structures.push({
                 symbol,
                 timestamp: candleTime,
-                signal_type: isChoch ? 'CHoCH' : 'BOS',
+                signal_type: isCHoCH ? 'CHoCH' : 'BOS',
                 direction: 'bearish',
-                price_level: candle.close
+                price_level: lastLow.price  // Level that was broken
             });
-            lastBreakType = 'bearish';
-            lastSwingLow = null; // consumed
+
+            trend = 'bearish';           // Trend shifts / confirms bearish
+            consumedLow = lastLow;        // Mark as consumed to avoid re-trigger
         }
     }
+
     return structures;
 }
 
