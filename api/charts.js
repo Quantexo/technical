@@ -21,7 +21,7 @@ async function proxy(url) {
 // ─── Route dispatcher ─────────────────────────────────────────
 // Routes:
 //   GET /api/charts?route=stock-chart&symbol=XYZ&time=1Y
-//   GET /api/charts?route=index-chart&symbol=NEPSE
+//   GET /api/charts?route=index-chart&symbol=NEPSE   (also sub-indices: DEVBANK, BANKING, etc.)
 export default async function handler(req, res) {
   cors(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -46,7 +46,8 @@ export default async function handler(req, res) {
       }
 
       case 'index-chart': {
-        const url = `https://sharehubnepal.com/live/api/v1/daily-graph/index/${symbol}`;
+        // Candle endpoint works for NEPSE and all sub-indices (DEVBANK, BANKING, SENSITIVE, etc.)
+        const url = `https://sharehubnepal.com/live/api/v1/daily-graph/index/candle/${symbol.toUpperCase()}`;
         return res.status(200).json(await proxy(url));
       }
 
