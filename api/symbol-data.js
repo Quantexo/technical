@@ -1,31 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 
 export default async function handler(req, res) {
-  // ─── CORS HEADERS ──────────────────────────────────────────────────
-  const origin = req.headers.origin;
-  
-  // Define allowed origins
-  const allowedOrigins = [
-    'http://localhost:5600',
-    'http://localhost:3000',
-    'https://nepse-hub.vercel.app',
-    'https://nepse-hub-backend.vercel.app',
-    // Add any other domains you use
-  ];
-
-  // Check if the origin is allowed
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else {
-    // For development - allow all origins (remove in production)
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-
+  // ─── CORS HEADERS (Public Developer Access) ─────────────────────────
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
-  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
-  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Max-Age', '86400');
 
   // ─── HANDLE OPTIONS (Preflight) ────────────────────────────────────
   if (req.method === 'OPTIONS') {
