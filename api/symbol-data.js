@@ -1,18 +1,38 @@
 import { createClient } from '@supabase/supabase-js';
 
 export default async function handler(req, res) {
+  // ─── CORS HEADERS ──────────────────────────────────────────────────
   const origin = req.headers.origin;
-  if (origin) {
+  
+  // Define allowed origins
+  const allowedOrigins = [
+    'http://localhost:5600',
+    'http://localhost:3000',
+    'https://nepse-hub.vercel.app',
+    'https://nepse-hub-backend.vercel.app',
+    // Add any other domains you use
+  ];
+
+  // Check if the origin is allowed
+  if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   } else {
+    // For development - allow all origins (remove in production)
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
+
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
   res.setHeader('Vary', 'Origin');
-  if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // ─── HANDLE OPTIONS (Preflight) ────────────────────────────────────
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // ─── MAIN REQUEST HANDLING ────────────────────────────────────────
   const { symbol, start_date, end_date } = req.query;
 
   if (!symbol) {
@@ -21,12 +41,14 @@ export default async function handler(req, res) {
 
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+  
   if (!supabaseUrl || !supabaseKey) {
+    console.error('❌ Supabase credentials missing');
     return res.status(500).json({ error: 'Supabase credentials missing' });
   }
-  const supabase = createClient(supabaseUrl, supabaseKey);
 
   try {
+    const supabase = createClient(supabaseUrl, supabaseKey);
     const symbolUpper = symbol.toUpperCase();
     
     let query = supabase
@@ -51,7 +73,11 @@ export default async function handler(req, res) {
     }
 
     const { data, error } = await query;
-    if (error) throw error;
+    
+    if (error) {
+      console.error('❌ Supabase query error:', error);
+      throw error;
+    }
 
     const mappedCandles = (data || []).map(d => ({
       Date: d.date,
@@ -66,8 +92,12 @@ export default async function handler(req, res) {
       success: true,
       data: mappedCandles
     });
+
   } catch (err) {
-    console.error('Symbol-data error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
+    console.error('❌ Symbol-data error:', err);
+    return res.status(500).json({ 
+      error: 'Internal server error', 
+      details: err.message 
+    });
   }
 }
