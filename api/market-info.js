@@ -90,19 +90,36 @@ export default async function handler(req, res) {
         const dividendType = req.query.type;
         const fiscalYear = req.query.fiscal_year;
         const status = req.query.status;
+        const upcoming = req.query.upcoming === 'true';
+
+        // ─── NEW: Sort handling ───
+        const ALLOWED_SORT_COLS = [
+          'symbol', 'company_name', 'dividend_type',
+          'bonus_percent', 'cash_percent', 'total_percent',
+          'book_close_date', 'announcement_date', 'fiscal_year', 'status'
+        ];
+        const sortCol = ALLOWED_SORT_COLS.includes(req.query.sort)
+          ? req.query.sort
+          : 'announcement_date';              // ← default sort column
+        const sortOrder = req.query.order === 'asc' ? 'asc' : 'desc';
 
         const supabase = await getSupabaseDividendClient();
 
         let query = supabase
           .from('dividends')
           .select('*', { count: 'exact' })
-          .order('announcement_date', { ascending: false })
+          .order(sortCol, { ascending: sortOrder === 'asc' })
           .range(from, to);
 
         if (symbol) query = query.eq('symbol', symbol.toUpperCase());
         if (dividendType) query = query.eq('dividend_type', dividendType.toUpperCase());
         if (fiscalYear) query = query.eq('fiscal_year', fiscalYear);
         if (status) query = query.eq('status', status.toUpperCase());
+
+        if (upcoming) {
+          const today = new Date().toISOString().split('T')[0];
+          query = query.gte('book_close_date', today);
+        }
 
         const { data, error, count } = await query;
         if (error) throw Object.assign(new Error(error.message), { status: 500 });
@@ -111,6 +128,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
           success: true,
+          sort: { column: sortCol, order: sortOrder },
           data: data || [],
           pagination: {
             page,
