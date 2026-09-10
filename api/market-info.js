@@ -209,6 +209,55 @@ export default async function handler(req, res) {
         });
       }
 
+      // ─── NEW: Dividend KPI Stats (aggregate counts, not page-limited) ───
+      case 'dividend-stats': {
+        const supabase = await getSupabaseDividendClient();
+
+        // Today in NPT (UTC+5:45)
+        const now = new Date();
+        const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+        const npt = new Date(utc + 345 * 60000);
+        const today = npt.toISOString().split('T')[0];
+
+        // Fetch the full dataset once, then compute counts in-memory.
+        // (For 137 rows this is fine; scale to SQL aggregates if the table grows.)
+        const { data, error } = await supabase
+          .from('dividends')
+          .select('dividend_type, bonus_percent, cash_percent, book_close_date, status');
+
+        if (error) throw Object.assign(new Error(error.message), { status: 500 });
+
+        const rows = data || [];
+
+        const cashCount = rows.filter(r => r.dividend_type === 'CASH').length;
+
+        const bonusCount = rows.filter(r => {
+          const bp = parseFloat(r.bonus_percent) || 0;
+          return r.dividend_type === 'BONUS' || bp > 0;
+        }).length;
+
+        const upcomingCount = rows.filter(r => {
+          const bc = r.book_close_date;
+          return bc && bc >= today;
+        }).length;
+
+        const todayCount = rows.filter(r => r.book_close_date === today).length;
+
+        res.setHeader('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=300');
+
+        return res.status(200).json({
+          success: true,
+          today,
+          stats: {
+            cash: cashCount,
+            bonus: bonusCount,
+            upcoming: upcomingCount,
+            today: todayCount,
+            total: rows.length
+          }
+        });
+      }
+
       default:
         return res.status(400).json({
           error: `Unknown route: "${route}". Valid routes: announcements, offering, dividend, book-close`
