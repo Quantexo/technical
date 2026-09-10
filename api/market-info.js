@@ -141,19 +141,19 @@ export default async function handler(req, res) {
         let query = supabase
           .from('dividends')
           .select('*', { count: 'exact' })
-          .not('book_close', 'is', null)
-          .order('book_close', { ascending: true })
+          .not('book_close_date', 'is', null)
+          .order('book_close_date', { ascending: true })
           .limit(size);
 
         // Upcoming window: [today, today + days]
         if (!includePast) {
-          query = query.gte('book_close', today).lte('book_close', futureStr);
+          query = query.gte('book_close_date', today).lte('book_close_date', futureStr);
         } else {
           // Include recent past (last 30 days) + upcoming
           const pastDate = new Date(today);
           pastDate.setDate(pastDate.getDate() - 30);
           const pastStr = pastDate.toISOString().split('T')[0];
-          query = query.gte('book_close', pastStr).lte('book_close', futureStr);
+          query = query.gte('book_close_date', pastStr).lte('book_close_date', futureStr);
         }
 
         if (symbol) query = query.eq('symbol', symbol.toUpperCase());
@@ -164,7 +164,7 @@ export default async function handler(req, res) {
         // Enrich with days-until countdown
         const todayMs = new Date(today).getTime();
         const enriched = (data || []).map(row => {
-          const bookCloseMs = new Date(row.book_close).getTime();
+          const bookCloseMs = new Date(row.book_close_date).getTime();
           const daysUntil = Math.round((bookCloseMs - todayMs) / 86400000);
           return {
             ...row,
