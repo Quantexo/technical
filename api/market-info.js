@@ -209,7 +209,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // ─── NEW: Dividend KPI Stats (aggregate counts, not page-limited) ───
+      // ─── Dividend KPI Stats (upcoming only) ───
       case 'dividend-stats': {
         const supabase = await getSupabaseDividendClient();
 
@@ -219,29 +219,35 @@ export default async function handler(req, res) {
         const npt = new Date(utc + 345 * 60000);
         const today = npt.toISOString().split('T')[0];
 
-        // Fetch the full dataset once, then compute counts in-memory.
-        // (For 137 rows this is fine; scale to SQL aggregates if the table grows.)
+        // Fetch only upcoming rows (book_close >= today)
         const { data, error } = await supabase
           .from('dividends')
-          .select('dividend_type, bonus_percent, cash_percent, book_close_date, status');
+          .select('dividend_type, bonus_percent, cash_percent, book_close_date')
+          .gte('book_close_date', today)
+          .not('book_close_date', 'is', null);
 
         if (error) throw Object.assign(new Error(error.message), { status: 500 });
 
         const rows = data || [];
 
-        const cashCount = rows.filter(r => r.dividend_type === 'CASH').length;
+        let cash = 0, bonus = 0, both = 0;
 
-        const bonusCount = rows.filter(r => {
+        rows.forEach(r => {
+          const type = (r.dividend_type || '').toUpperCase();
           const bp = parseFloat(r.bonus_percent) || 0;
-          return r.dividend_type === 'BONUS' || bp > 0;
-        }).length;
 
-        const upcomingCount = rows.filter(r => {
-          const bc = r.book_close_date;
-          return bc && bc >= today;
-        }).length;
-
-        const todayCount = rows.filter(r => r.book_close_date === today).length;
+          if (type === 'CASH') cash++;
+          else if (type === 'BONUS') bonus++;
+          else if (type === 'BOTH') {
+            both++;
+            // BOTH counts toward both cash AND bonus totals
+            cash++;
+            bonus++;
+          } else if (bp > 0) {
+            // Fallback: any row with bonus_percent > 0
+            bonus++;
+          }
+        });
 
         res.setHeader('Cache-Control', 'public, s-maxage=120, stale-while-revalidate=300');
 
@@ -249,11 +255,10 @@ export default async function handler(req, res) {
           success: true,
           today,
           stats: {
-            cash: cashCount,
-            bonus: bonusCount,
-            upcoming: upcomingCount,
-            today: todayCount,
-            total: rows.length
+            total: rows.length,
+            cash,
+            bonus,
+            both
           }
         });
       }
