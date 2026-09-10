@@ -209,7 +209,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // ─── Dividend KPI Stats (upcoming only) ───
+      // ─── Dividend KPI Stats (upcoming + today) ───
       case 'dividend-stats': {
         const supabase = await getSupabaseDividendClient();
 
@@ -219,7 +219,7 @@ export default async function handler(req, res) {
         const npt = new Date(utc + 345 * 60000);
         const today = npt.toISOString().split('T')[0];
 
-        // Fetch only upcoming rows (book_close >= today)
+        // Fetch upcoming rows (book_close >= today), includes today
         const { data, error } = await supabase
           .from('dividends')
           .select('dividend_type, bonus_percent, cash_percent, book_close_date')
@@ -230,22 +230,32 @@ export default async function handler(req, res) {
 
         const rows = data || [];
 
-        let cash = 0, bonus = 0, both = 0;
+        let cash = 0;
+        let bonus = 0;
+        let both = 0;
+        let todayCount = 0;
 
         rows.forEach(r => {
           const type = (r.dividend_type || '').toUpperCase();
           const bp = parseFloat(r.bonus_percent) || 0;
 
-          if (type === 'CASH') cash++;
-          else if (type === 'BONUS') bonus++;
-          else if (type === 'BOTH') {
+          // Cash count (CASH or BOTH)
+          if (type === 'CASH') {
+            cash++;
+          } else if (type === 'BONUS') {
+            bonus++;
+          } else if (type === 'BOTH') {
             both++;
-            // BOTH counts toward both cash AND bonus totals
             cash++;
             bonus++;
           } else if (bp > 0) {
-            // Fallback: any row with bonus_percent > 0
+            // Fallback for null type with bonus
             bonus++;
+          }
+
+          // ─── Count today's closures ───
+          if (r.book_close_date === today) {
+            todayCount++;
           }
         });
 
@@ -255,10 +265,11 @@ export default async function handler(req, res) {
           success: true,
           today,
           stats: {
-            total: rows.length,
-            cash,
-            bonus,
-            both
+            total: rows.length,       // all upcoming (includes today)
+            cash: cash,               // upcoming cash (CASH + BOTH)
+            bonus: bonus,             // upcoming bonus (BONUS + BOTH)
+            both: both,               // upcoming both only
+            today: todayCount         // ← book_close === today
           }
         });
       }
