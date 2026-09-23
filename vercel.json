@@ -59,6 +59,10 @@
     { "source": "/api/indicators/crossover",  "destination": "/api/indicators?route=crossover" },
     { "source": "/api/indicators/volume",     "destination": "/api/indicators?route=volume" },
     { "source": "/api/indicators/ad_vwap",    "destination": "/api/indicators?route=ad_vwap" },
+    { "source": "/api/indicators/bulk-transactions", "destination": "/api/indicators?route=bulk-transactions" },
+    { "source": "/api/indicators/bulk-transaction",  "destination": "/api/indicators?route=bulk-transactions" },
+    { "source": "/api/bulk-transactions",            "destination": "/api/indicators?route=bulk-transactions" },
+    { "source": "/api/bulk-transaction",             "destination": "/api/indicators?route=bulk-transactions" },
     { "source": "/api/indicators",            "destination": "/api/indicators" },
 
     { "source": "/api/broker-holding",        "destination": "/api/brokerHolding" },
