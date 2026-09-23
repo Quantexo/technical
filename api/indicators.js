@@ -82,12 +82,6 @@ async function handleBulkTransactions(req, res) {
   const minQty = parseInt(req.query.min_quantity || req.query.min_qty, 10);
   const maxQty = parseInt(req.query.max_quantity || req.query.max_qty, 10);
 
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || req.query.size, 10) || 50));
-  const offset = req.query.offset !== undefined
-    ? Math.max(0, parseInt(req.query.offset, 10) || 0)
-    : (page - 1) * limit;
-
   // Allowed columns for sorting (strictly from the projected columns)
   const ALLOWED_SORT_COLS = [
     'contract_id',
@@ -108,7 +102,7 @@ async function handleBulkTransactions(req, res) {
   // Build query - only select allowed columns, never id, source, or created_at
   let query = supabase
     .from('bulk_transactions')
-    .select(BULK_TRANSACTION_FIELDS, { count: 'exact' });
+    .select(BULK_TRANSACTION_FIELDS);
 
   // Symbol filtering
   if (symbolsList.length === 1) {
@@ -157,24 +151,15 @@ async function handleBulkTransactions(req, res) {
       .order('trade_time', { ascending: false });
   }
 
-  // Pagination range
-  query = query.range(offset, offset + limit - 1);
-
-  const { data, count, error } = await query;
+  // No pagination - fetch all rows at once
+  const { data, error } = await query;
   if (error) throw error;
 
   res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=120');
 
   return res.status(200).json({
     success: true,
-    pagination: {
-      page: Math.floor(offset / limit) + 1,
-      limit,
-      offset,
-      total: count || 0,
-      totalPages: Math.ceil((count || 0) / limit),
-      has_next: (offset + limit) < (count || 0)
-    },
+    total: (data || []).length,
     data: data || []
   });
 }
@@ -222,7 +207,7 @@ export default async function handler(req, res) {
     }
 
     query = query.order('symbol', { ascending: true });
-    
+
     // Pagination
     query = query.range(offset, offset + limit - 1);
 
@@ -233,11 +218,11 @@ export default async function handler(req, res) {
     let countQuery = supabase
       .from('technical_indicators')
       .select('symbol', { count: 'exact', head: true });
-      
+
     if (symbolsList.length > 0) {
       countQuery = countQuery.in('symbol', symbolsList);
     }
-    
+
     const { count: totalCount, error: countError } = await countQuery;
     if (countError) throw countError;
 
