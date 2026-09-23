@@ -50,7 +50,7 @@ function getSupabaseIndicatorsClient() {
 function getSupabaseBulkClient() {
   if (_supabaseClient3) return _supabaseClient3;
   const url = process.env.SUPABASE_URL_3;
-  const key = process.env.SUPABASE_ANON_KEY_3 || process.env.SUPABASE_SERVICE_ROLE_KEY_3 || process.env.SUPABASE_KEY_3;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY_3 || process.env.SUPABASE_ANON_KEY_3 || process.env.SUPABASE_KEY_3;
   if (!url || !key) {
     throw Object.assign(new Error('Missing SUPABASE_URL_3 or SUPABASE_ANON_KEY_3 environment variables'), { status: 500 });
   }
@@ -154,7 +154,7 @@ async function handleBulkTransactions(req, res) {
   } else {
     query = query
       .order('business_date', { ascending: false })
-      .order('trade_time', { ascending: false, nullsFirst: false });
+      .order('trade_time', { ascending: false });
   }
 
   // Pagination range
