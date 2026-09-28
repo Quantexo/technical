@@ -211,10 +211,6 @@ async function handleMktTransactions(req, res) {
   const sortCol   = ALLOWED_SORT_COLS.includes(requestedSort) ? requestedSort : null;
   const sortOrder = (req.query.order || '').toLowerCase().trim() === 'asc' ? 'asc' : 'desc';
 
-  // Pagination
-  // const limit  = Math.min(parseInt(req.query.limit,  10) || 10000, 20000);
-  // const offset = parseInt(req.query.offset, 10) || 0;
-
   let query = supabase
     .from('bulk_market_transactions')
     .select(MKT_TRANSACTION_FIELDS);
@@ -260,9 +256,7 @@ async function handleMktTransactions(req, res) {
       .order('last_transaction_time', { ascending: false });
   }
 
-  // Pagination
-  query = query.range(offset, offset + limit - 1);
-
+  // No pagination - fetch all rows at once
   const { data, error } = await query;
   if (error) throw error;
 
@@ -270,12 +264,7 @@ async function handleMktTransactions(req, res) {
 
   return res.status(200).json({
     success: true,
-    pagination: {
-      offset,
-      limit,
-      total: (data || []).length,
-      // next_offset: (data || []).length === limit ? offset + limit : null
-    },
+    total: (data || []).length,
     data: data || []
   });
 }
