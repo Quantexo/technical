@@ -30,6 +30,24 @@ const BULK_TRANSACTION_FIELDS = [
   'trade_time'
 ].join(',');
 
+// ─── Market Transactions Selected Columns ────────────────────────
+const MKT_TRANSACTION_FIELDS = [
+  'start_contract_id',
+  'end_contract_id',
+  'stock_symbol',
+  'type',
+  'broker_id',
+  'quantity',
+  'amount',
+  'open_price',
+  'close_price',
+  'average_price',
+  'change_percent',
+  'transactions',
+  'last_transaction_time',
+  'business_date'
+].join(',');
+
 // Cached Supabase clients
 let _supabaseClient1 = null;
 let _supabaseClient3 = null;
@@ -164,6 +182,104 @@ async function handleBulkTransactions(req, res) {
   });
 }
 
+async function handleMktTransactions(req, res) {
+  const supabase = getSupabaseBulkClient();
+
+  const symbol = (req.query.symbol || req.query.stock_symbol || '').trim().toUpperCase();
+  const symbolsParam = req.query.symbols || '';
+  const symbolsList = symbolsParam
+    ? symbolsParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+    : (symbol ? [symbol] : []);
+
+  const businessDate = req.query.business_date || req.query.date;
+  const fromDate = req.query.from_date || req.query.start_date;
+  const toDate = req.query.to_date || req.query.end_date;
+
+  const txType = (req.query.type || '').trim().toUpperCase();   // e.g. 'BUY', 'SELL'
+  const brokerId = req.query.broker_id || req.query.broker;
+
+  const minAmount = parseFloat(req.query.min_amount);
+  const maxAmount = parseFloat(req.query.max_amount);
+  const minQty    = parseInt(req.query.min_quantity || req.query.min_qty, 10);
+  const maxQty    = parseInt(req.query.max_quantity || req.query.max_qty, 10);
+
+  const ALLOWED_SORT_COLS = [
+    'stock_symbol', 'broker_id', 'business_date', 'last_transaction_time',
+    'quantity', 'amount', 'average_price', 'change_percent', 'transactions'
+  ];
+  const requestedSort = (req.query.sort || '').toLowerCase().trim();
+  const sortCol   = ALLOWED_SORT_COLS.includes(requestedSort) ? requestedSort : null;
+  const sortOrder = (req.query.order || '').toLowerCase().trim() === 'asc' ? 'asc' : 'desc';
+
+  // Pagination
+  const limit  = Math.min(parseInt(req.query.limit,  10) || 200, 2000);
+  const offset = parseInt(req.query.offset, 10) || 0;
+
+  let query = supabase
+    .from('bulk_market_transactions')
+    .select(MKT_TRANSACTION_FIELDS);
+
+  // Symbol filtering
+  if (symbolsList.length === 1) {
+    query = query.eq('stock_symbol', symbolsList[0]);
+  } else if (symbolsList.length > 1) {
+    query = query.in('stock_symbol', symbolsList);
+  }
+
+  // Date filtering
+  if (businessDate) {
+    query = query.eq('business_date', businessDate);
+  } else {
+    if (fromDate) query = query.gte('business_date', fromDate);
+    if (toDate)   query = query.lte('business_date', toDate);
+  }
+
+  // Type filter (BUY / SELL)
+  if (txType) {
+    query = query.eq('type', txType);
+  }
+
+  // Broker filter
+  if (brokerId) {
+    const bId = parseInt(brokerId, 10);
+    if (!isNaN(bId)) query = query.eq('broker_id', bId);
+  }
+
+  // Amount & quantity filters
+  if (!isNaN(minAmount)) query = query.gte('amount', minAmount);
+  if (!isNaN(maxAmount)) query = query.lte('amount', maxAmount);
+  if (!isNaN(minQty))    query = query.gte('quantity', minQty);
+  if (!isNaN(maxQty))    query = query.lte('quantity', maxQty);
+
+  // Sorting
+  if (sortCol) {
+    query = query.order(sortCol, { ascending: sortOrder === 'asc' });
+  } else {
+    query = query
+      .order('business_date',        { ascending: false })
+      .order('last_transaction_time', { ascending: false });
+  }
+
+  // Pagination
+  query = query.range(offset, offset + limit - 1);
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=120');
+
+  return res.status(200).json({
+    success: true,
+    pagination: {
+      offset,
+      limit,
+      total: (data || []).length,
+      next_offset: (data || []).length === limit ? offset + limit : null
+    },
+    data: data || []
+  });
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
@@ -178,6 +294,11 @@ export default async function handler(req, res) {
     // ─── Bulk Transactions Route ──────────────────────────────────
     if (['bulk-transactions', 'bulk_transactions', 'bulk-transaction', 'bulk_transaction'].includes(route)) {
       return await handleBulkTransactions(req, res);
+    }
+
+    // ─── Market Transactions Route ────────────────────────────────
+    if (['mkt-txn', 'mkt_txn', 'market-transactions', 'market_transactions'].includes(route)) {
+      return await handleMktTransactions(req, res);
     }
 
     // ─── Technical Indicators Routes ──────────────────────────────
