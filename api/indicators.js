@@ -274,7 +274,7 @@ async function handleMktTransactions(req, res) {
       offset,
       limit,
       total: (data || []).length,
-      next_offset: (data || []).length === limit ? offset + limit : null
+      // next_offset: (data || []).length === limit ? offset + limit : null
     },
     data: data || []
   });
