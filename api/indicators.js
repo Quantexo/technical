@@ -212,8 +212,8 @@ async function handleMktTransactions(req, res) {
   const sortOrder = (req.query.order || '').toLowerCase().trim() === 'asc' ? 'asc' : 'desc';
 
   // Pagination
-  const limit  = Math.min(parseInt(req.query.limit,  10) || 10000, 20000);
-  const offset = parseInt(req.query.offset, 10) || 0;
+  // const limit  = Math.min(parseInt(req.query.limit,  10) || 10000, 20000);
+  // const offset = parseInt(req.query.offset, 10) || 0;
 
   let query = supabase
     .from('bulk_market_transactions')
