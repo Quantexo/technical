@@ -13,7 +13,7 @@ export default async function handler(req, res) {
   }
 
   // ─── MAIN REQUEST HANDLING ────────────────────────────────────────
-  const { symbol, start_date, end_date } = req.query;
+  const { symbol, start_date, end_date, route } = req.query;
 
   if (!symbol) {
     return res.status(400).json({ error: 'Missing symbol parameter' });
@@ -29,37 +29,82 @@ export default async function handler(req, res) {
 
   try {
     const supabase = createClient(supabaseUrl, supabaseKey);
-    const symbolUpper = symbol.toUpperCase();
-    
-    let query = supabase
-      .from('prices')
-      .select('date, open, high, low, close, volume')
-      .eq('symbol', symbolUpper)
-      .order('date', { ascending: true });
+    const symbolUpper = symbol.trim().toUpperCase();
+    const isChartRoute = route && (route.toLowerCase() === 'charts' || route.toLowerCase() === 'chart');
 
-    // Apply date filters
-    if (start_date) {
-      query = query.gte('date', start_date);
+    let rawData = [];
+
+    if (isChartRoute) {
+      // ─── ROUTE: CHARTS (Load all available rows for the symbol) ─────────
+      let from = 0;
+      const pageSize = 1000;
+      let hasMore = true;
+
+      while (hasMore) {
+        let chartQuery = supabase
+          .from('prices')
+          .select('date, open, high, low, close, volume')
+          .eq('symbol', symbolUpper)
+          .order('date', { ascending: true })
+          .range(from, from + pageSize - 1);
+
+        if (start_date && start_date.toLowerCase() !== 'all') {
+          chartQuery = chartQuery.gte('date', start_date);
+        }
+        if (end_date) {
+          chartQuery = chartQuery.lte('date', end_date);
+        }
+
+        const { data, error } = await chartQuery;
+        if (error) {
+          console.error('❌ Supabase query error:', error);
+          throw error;
+        }
+
+        if (!data || data.length === 0) break;
+        rawData.push(...data);
+        if (data.length < pageSize) {
+          hasMore = false;
+        }
+        from += pageSize;
+        if (from >= 50000) break;
+      }
     } else {
-      // Default to last 1 year if start_date is not specified
-      const oneYearAgo = new Date();
-      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-      const formattedDate = oneYearAgo.toISOString().split('T')[0];
-      query = query.gte('date', formattedDate);
+      // ─── DEFAULT ROUTE (Standard symbol data, last 1 year by default) ───
+      const limitNum = Math.min(parseInt(req.query.limit, 10) || 10000, 50000);
+      
+      let query = supabase
+        .from('prices')
+        .select('date, open, high, low, close, volume')
+        .eq('symbol', symbolUpper)
+        .order('date', { ascending: true })
+        .limit(limitNum);
+
+      // Apply date filters
+      if (start_date && start_date.toLowerCase() !== 'all') {
+        query = query.gte('date', start_date);
+      } else if (!start_date && req.query.all !== 'true') {
+        // Default to last 1 year if start_date is not specified
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        const formattedDate = oneYearAgo.toISOString().split('T')[0];
+        query = query.gte('date', formattedDate);
+      }
+
+      if (end_date) {
+        query = query.lte('date', end_date);
+      }
+
+      const { data, error } = await query;
+      
+      if (error) {
+        console.error('❌ Supabase query error:', error);
+        throw error;
+      }
+      rawData = data || [];
     }
 
-    if (end_date) {
-      query = query.lte('date', end_date);
-    }
-
-    const { data, error } = await query;
-    
-    if (error) {
-      console.error('❌ Supabase query error:', error);
-      throw error;
-    }
-
-    const mappedCandles = (data || []).map(d => ({
+    const mappedCandles = rawData.map(d => ({
       Date: d.date,
       Open: parseFloat(d.open || 0),
       High: parseFloat(d.high || 0),
@@ -70,6 +115,9 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       success: true,
+      route: isChartRoute ? 'charts' : 'default',
+      symbol: symbolUpper,
+      count: mappedCandles.length,
       data: mappedCandles
     });
 
