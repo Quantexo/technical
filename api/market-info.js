@@ -35,6 +35,29 @@ async function getSupabaseDividendClient() {
   return _supabaseDivClient;
 }
 
+// ─── Supabase 5 Client (Admin Settings — service_role, server-side only) ───
+let _supabaseAdminClient = null;
+
+async function getSupabaseAdminClient() {
+  if (_supabaseAdminClient) return _supabaseAdminClient;
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const url = process.env.SUPABASE_URL_5;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY_5;
+
+  if (!url || !key) {
+    throw Object.assign(
+      new Error('Missing SUPABASE_URL_5 or SUPABASE_SERVICE_ROLE_KEY_5'),
+      { status: 500 }
+    );
+  }
+
+  _supabaseAdminClient = createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+  return _supabaseAdminClient;
+}
+
 // ─── Date helper (NPT today as YYYY-MM-DD) ─────────────────────
 function getTodayNPT() {
   const now = new Date();
@@ -52,6 +75,7 @@ function getTodayNPT() {
 //   GET /api/market-info?route=offering&type=0&for=2&size=30
 //   GET /api/market-info?route=dividend&page=1&size=20&symbol=NABIL&type=CASH
 //   GET /api/market-info?route=book-close&days=30&size=50
+//   GET /api/market-info?route=site-status  ← public banner + maintenance mode
 export default async function handler(req, res) {
   cors(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -271,6 +295,51 @@ export default async function handler(req, res) {
             both: both,               // upcoming both only
             today: todayCount         // ← book_close === today
           }
+        });
+      }
+
+      // ─── Site Status (banner + maintenance_mode from admin_settings) ───
+      case 'site-status': {
+        const supabase = await getSupabaseAdminClient();
+
+        const { data, error } = await supabase
+          .from('admin_settings')
+          .select('key, value, updated_at')
+          .in('key', ['banner', 'maintenance_mode']);
+
+        if (error) throw Object.assign(new Error(error.message), { status: 500 });
+
+        const rows = data || [];
+        const get = (key) => rows.find(r => r.key === key);
+
+        const bannerRow  = get('banner');
+        const maintRow   = get('maintenance_mode');
+
+        // Check banner expiry server-side — never return an expired banner as active
+        let bannerValue = bannerRow?.value ?? { active: false };
+        if (bannerValue.active && bannerValue.expires_at) {
+          if (new Date(bannerValue.expires_at) < new Date()) {
+            bannerValue = { ...bannerValue, active: false }; // auto-expired
+          }
+        }
+
+        // Short cache: public users see changes within 30 seconds
+        res.setHeader('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
+
+        return res.status(200).json({
+          success:          true,
+          banner: {
+            active:     !!bannerValue.active,
+            level:      bannerValue.level      || 'info',
+            message:    bannerValue.message    || '',
+            expires_at: bannerValue.expires_at || null,
+            updated_at: bannerRow?.updated_at  || null,
+          },
+          maintenance_mode: {
+            active:     !!(maintRow?.value?.active),
+            message:    maintRow?.value?.message || 'We are undergoing scheduled maintenance. Please check back shortly.',
+            updated_at: maintRow?.updated_at || null,
+          },
         });
       }
 
