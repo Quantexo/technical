@@ -40,6 +40,7 @@
     { "source": "/market-info/debenture-offering",     "destination": "/api/market-info?route=offering&type=4&for=2" },
     { "source": "/api/market-info/announcements",      "destination": "/api/market-info?route=announcements" },
     { "source": "/api/market-info/offering",           "destination": "/api/market-info?route=offering" },
+    { "source": "/api/site-status",                    "destination": "/api/market-info?route=site-status" },
 
     { "source": "/stock-profile/alpha-beta",        "destination": "/api/stock-profile?route=alpha-beta" },
     { "source": "/stock-profile/broker-top-holding","destination": "/api/stock-profile?route=broker-top-holding" },
