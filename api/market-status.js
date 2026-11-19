@@ -97,7 +97,7 @@ export default async function handler(req, res) {
       asOf = getLastTradingDay(npt);
     }
 
-    const formattedAsOf = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} ${String(asOf.getHours()).padStart(2, '0')}:${String(asOf.getMinutes()).padStart(2, '0')}:${String(asOf.getSeconds()).padStart(2, '0')} NPT`; A
+    const formattedAsOf = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} ${String(asOf.getHours()).padStart(2, '0')}:${String(asOf.getMinutes()).padStart(2, '0')}:${String(asOf.getSeconds()).padStart(2, '0')} NPT`;
 
     return res.status(200).json({
       today: todayStatus,
