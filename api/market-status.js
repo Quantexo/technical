@@ -1,8 +1,5 @@
 const HOLIDAYS = [
-  '2026-05-28', '2026-05-29', '2026-08-28',
-  '2026-09-04',
-  '2026-09-08',
-  '2026-09-21',
+  '2026-05-28', '2026-05-29', '2026-08-28', '2026-09-04', '2026-09-08', '2026-09-21',
   '2026-09-25',
   '2026-10-11',
   '2026-10-17',
@@ -18,7 +15,6 @@ const HOLIDAYS = [
   '2026-11-11',
   '2026-11-12',
   '2026-11-15',
-  '2026-11-16',
   '2026-12-24',
   '2026-12-25',
   '2026-12-30',
@@ -39,19 +35,22 @@ function getNPTime() {
 }
 
 function getLastTradingDay(referenceDate) {
-  const checkDate = new Date(referenceDate.getTime() - 24 * 60 * 60 * 1000);
+  const checkDate = new Date(referenceDate.getTime());
+  checkDate.setHours(15, 0, 0, 0);
+
   while (true) {
     const yyyy = checkDate.getFullYear();
     const mm = String(checkDate.getMonth() + 1).padStart(2, '0');
     const dd = String(checkDate.getDate()).padStart(2, '0');
     const checkDateStr = `${yyyy}-${mm}-${dd}`;
-    const day = checkDate.getDay(); // 0 is Sunday, 6 is Saturday
+    const day = checkDate.getDay();
+
     const isMarketDay = (day >= 1 && day <= 5) && !HOLIDAYS.includes(checkDateStr);
-    
+
     if (isMarketDay) {
-      checkDate.setHours(15, 0, 0, 0);
       return checkDate;
     }
+    // Step back one day and try again
     checkDate.setTime(checkDate.getTime() - 24 * 60 * 60 * 1000);
   }
 }
@@ -111,7 +110,7 @@ export default async function handler(req, res) {
       asOf = getLastTradingDay(npt);
     }
 
-    const formattedAsOf = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} ${String(asOf.getHours()).padStart(2, '0')}:${String(asOf.getMinutes()).padStart(2, '0')}:${String(asOf.getSeconds()).padStart(2, '0')} NPT`;
+    const formattedAsOf = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} ${String(asOf.getHours()).padStart(2, '0')}:${String(asOf.getMinutes()).padStart(2, '0')}:${String(asOf.getSeconds()).padStart(2, '0')} NPT`; A
 
     return res.status(200).json({
       today: todayStatus,
